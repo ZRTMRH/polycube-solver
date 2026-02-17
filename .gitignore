@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# GIF outputs (can be regenerated)
+*.gif
+
+# Old root-level Phase 1 files (now in phase1/)
+/dlx_solver.py
+/polycube.py
+/solver.py
+/test_cases.py
+/visualization.py
