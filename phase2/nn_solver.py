@@ -10,7 +10,6 @@ Uses the trained CuboidNet to score partial states and guide search:
 import sys
 import os
 import time
-import random
 
 import numpy as np
 import torch
@@ -115,8 +114,9 @@ def nn_solve(pieces, grid_size, model, max_pieces=10, beam_width=32,
             break
 
         candidates = []
+        beam_policy_logits = _score_beam_policies(beam, model, max_pieces, device)
 
-        for state in beam:
+        for state_idx, state in enumerate(beam):
             if time.time() - t0 > timeout:
                 break
 
@@ -138,10 +138,15 @@ def nn_solve(pieces, grid_size, model, max_pieces=10, beam_width=32,
                 p for p in placements if not (p & state.occupied)
             ]
 
-            # Cap candidates per state to avoid explosion
+            # Cap candidates per state to avoid explosion.
+            # Rank placements with the policy head so expansion is model-guided
+            # and deterministic (no random sampling).
             if len(valid_placements) > max_candidates_per_state:
-                valid_placements = random.sample(
-                    valid_placements, max_candidates_per_state
+                valid_placements = _select_top_policy_placements(
+                    state=state,
+                    placements=valid_placements,
+                    top_k=max_candidates_per_state,
+                    policy_logits=beam_policy_logits[state_idx],
                 )
 
             for placement in valid_placements:
@@ -234,6 +239,54 @@ def _pick_mrv_piece(state, piece_placements):
             best_idx = local_idx
 
     return best_idx
+
+
+def _score_beam_policies(beam, model, max_pieces, device):
+    """Compute policy logits for every state in the beam in one batch."""
+    if not beam:
+        return []
+
+    batch_size = len(beam)
+    grid_size = beam[0].grid_size
+    states = np.zeros(
+        (batch_size, 1 + max_pieces, grid_size, grid_size, grid_size),
+        dtype=np.float32
+    )
+    for i, state in enumerate(beam):
+        states[i] = encode_state(
+            state.grid, state.remaining_pieces, grid_size, max_pieces
+        )
+
+    with torch.no_grad():
+        state_tensor = torch.tensor(states, dtype=torch.float32, device=device)
+        _, policy_logits = model(state_tensor)
+
+    return [policy_logits[i].detach().cpu().numpy() for i in range(batch_size)]
+
+
+def _select_top_policy_placements(state, placements, top_k, policy_logits):
+    """Select top-k placements using policy logits from the current state.
+
+    The current policy head emits N^3 logits over grid cells. We map a
+    candidate placement to a scalar by averaging logits over its occupied cells.
+    """
+    if top_k <= 0 or not placements:
+        return []
+    logits = policy_logits
+
+    n = state.grid_size
+    n2 = n * n
+
+    scored = []
+    for placement in placements:
+        flat_indices = [x * n2 + y * n + z for x, y, z in placement]
+        score = float(np.mean(logits[flat_indices]))
+        # Deterministic tie-breaker by sorted placement coordinates.
+        tie_break = tuple(sorted(placement))
+        scored.append((score, tie_break, placement))
+
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    return [item[2] for item in scored[:top_k]]
 
 
 def _score_candidates(candidates, model, max_pieces, device):

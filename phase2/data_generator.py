@@ -155,6 +155,7 @@ def generate_puzzle_instances(num_instances, grid_size, polycube_catalog,
                 'pieces': pieces,
                 'grid_size': grid_size,
                 'solution': solutions[0],
+                'instance_id': len(instances),
             })
             if verbose:
                 print(f"  Instance {len(instances)}/{num_instances} found "
@@ -318,6 +319,53 @@ def encode_placement(placement, grid_size):
     return tensor
 
 
+def _placement_sort_key(placement):
+    """Deterministic key for ordering placements."""
+    return tuple(sorted(placement))
+
+
+def encode_policy_action_mask(placement, grid_size):
+    """Encode a placement as a flat action mask used for policy supervision.
+
+    The mask is normalized by piece size so dot products with cell logits
+    represent the average score over the placement cells.
+    """
+    n3 = grid_size ** 3
+    vec = np.zeros((n3,), dtype=np.float32)
+    if not placement:
+        return vec
+    weight = 1.0 / float(len(placement))
+    n2 = grid_size * grid_size
+    for x, y, z in placement:
+        vec[x * n2 + y * grid_size + z] = weight
+    return vec
+
+
+def build_policy_candidates(grid, next_piece, target_placement, grid_size):
+    """Build valid placement actions and target index for policy training."""
+    occupied = set(tuple(idx) for idx in np.argwhere(grid > 0.5))
+    valid = [
+        p for p in get_all_placements(next_piece, grid_size)
+        if not (p & occupied)
+    ]
+    valid = sorted(valid, key=_placement_sort_key)
+
+    if not valid:
+        return np.zeros((0, grid_size ** 3), dtype=np.float32), -1
+
+    action_masks = np.stack(
+        [encode_policy_action_mask(p, grid_size) for p in valid], axis=0
+    ).astype(np.float32)
+
+    target_idx = -1
+    for i, p in enumerate(valid):
+        if p == target_placement:
+            target_idx = i
+            break
+
+    return action_masks, target_idx
+
+
 # ── Training Data Generation ─────────────────────────────────────────────────
 
 def generate_training_data(instances, max_pieces, num_negatives_per_solution=2,
@@ -344,6 +392,7 @@ def generate_training_data(instances, max_pieces, num_negatives_per_solution=2,
         pieces = inst['pieces']
         grid_size = inst['grid_size']
         solution = inst['solution']
+        instance_id = inst.get('instance_id', inst_idx)
         num_pieces = len(pieces)
 
         # Generate positive examples: remove pieces one at a time from solution
@@ -365,7 +414,14 @@ def generate_training_data(instances, max_pieces, num_negatives_per_solution=2,
 
             # The next move: place the next piece
             next_piece_idx_in_remaining = 0  # first remaining piece
+            next_piece = remaining_pieces_list[next_piece_idx_in_remaining]
             next_placement = solution[piece_idx]
+            policy_candidates, policy_target_idx = build_policy_candidates(
+                grid, next_piece, next_placement, grid_size
+            )
+            if policy_target_idx < 0:
+                # Defensive guard: skip malformed positive examples.
+                continue
 
             state_tensor = encode_state(
                 grid, remaining_pieces_list, grid_size, max_pieces
@@ -378,8 +434,11 @@ def generate_training_data(instances, max_pieces, num_negatives_per_solution=2,
                 'label': 1.0,  # solvable
                 'value': len(remaining_indices),  # pieces remaining
                 'next_placement': encode_placement(next_placement, grid_size),
-                'next_piece_idx': 0,  # index into remaining pieces list
+                'next_piece_idx': next_piece_idx_in_remaining,
+                'policy_candidates': policy_candidates,
+                'policy_target_idx': policy_target_idx,
                 'grid_size': grid_size,
+                'instance_id': instance_id,
             })
 
         # Generate negative examples
@@ -390,7 +449,7 @@ def generate_training_data(instances, max_pieces, num_negatives_per_solution=2,
         while neg_count < num_negatives_per_solution and neg_attempts < max_neg_attempts:
             neg_attempts += 1
             neg_example = _generate_negative_example(
-                pieces, grid_size, max_pieces
+                pieces, grid_size, max_pieces, instance_id=instance_id
             )
             if neg_example is not None:
                 examples.append(neg_example)
@@ -409,7 +468,7 @@ def generate_training_data(instances, max_pieces, num_negatives_per_solution=2,
     return examples
 
 
-def _generate_negative_example(pieces, grid_size, max_pieces):
+def _generate_negative_example(pieces, grid_size, max_pieces, instance_id=None):
     """Try to create an unsolvable partial state.
 
     Strategy: randomly place a subset of pieces in valid positions, then
@@ -484,7 +543,10 @@ def _generate_negative_example(pieces, grid_size, max_pieces):
         'value': len(remaining_indices),
         'next_placement': np.zeros((grid_size, grid_size, grid_size), dtype=np.float32),
         'next_piece_idx': -1,  # no valid next move
+        'policy_candidates': np.zeros((0, grid_size ** 3), dtype=np.float32),
+        'policy_target_idx': -1,
         'grid_size': grid_size,
+        'instance_id': instance_id,
     }
 
 
@@ -541,6 +603,9 @@ def create_torch_dataset(examples):
 
     class PolycubeDataset(Dataset):
         def __init__(self, examples):
+            if not examples:
+                raise ValueError("examples must be non-empty")
+
             self.states = torch.tensor(
                 np.array([e['state'] for e in examples]), dtype=torch.float32
             )
@@ -557,6 +622,64 @@ def create_torch_dataset(examples):
                 np.array([e['next_piece_idx'] for e in examples]), dtype=torch.long
             )
 
+            # Build placement-action candidates for policy training.
+            n_examples = len(examples)
+            n3 = int(np.prod(examples[0]['state'].shape[1:]))
+
+            candidate_lists = []
+            target_indices = []
+            for e in examples:
+                cands = e.get('policy_candidates', None)
+                tgt = e.get('policy_target_idx', None)
+
+                if cands is None:
+                    # Backward compatibility with older example format.
+                    if e.get('next_piece_idx', -1) >= 0:
+                        flat = np.array(e['next_placement'], dtype=np.float32).reshape(-1)
+                        s = float(flat.sum())
+                        if s > 0:
+                            flat = flat / s
+                        cands = flat.reshape(1, -1)
+                        tgt = 0
+                    else:
+                        cands = np.zeros((0, n3), dtype=np.float32)
+                        tgt = -1
+
+                cands = np.array(cands, dtype=np.float32)
+                if cands.ndim == 1:
+                    cands = cands.reshape(1, -1)
+                if cands.shape[0] == 0:
+                    cands = np.zeros((0, n3), dtype=np.float32)
+                if cands.shape[-1] != n3:
+                    raise ValueError(
+                        f"policy candidate width {cands.shape[-1]} != state width {n3}"
+                    )
+                if tgt is None:
+                    tgt = -1
+
+                candidate_lists.append(cands)
+                target_indices.append(int(tgt))
+
+            max_actions = max(c.shape[0] for c in candidate_lists)
+            max_actions = max(max_actions, 1)
+            policy_candidates = np.zeros(
+                (n_examples, max_actions, n3), dtype=np.float32
+            )
+            policy_action_mask = np.zeros(
+                (n_examples, max_actions), dtype=np.bool_
+            )
+            for i, cands in enumerate(candidate_lists):
+                n = cands.shape[0]
+                if n > 0:
+                    policy_candidates[i, :n, :] = cands
+                    policy_action_mask[i, :n] = True
+
+            self.policy_candidates = torch.tensor(policy_candidates, dtype=torch.float32)
+            self.policy_action_mask = torch.tensor(policy_action_mask, dtype=torch.bool)
+            self.policy_target_idx = torch.tensor(
+                np.array(target_indices, dtype=np.int64), dtype=torch.long
+            )
+
         def __len__(self):
             return len(self.labels)
 
@@ -567,27 +690,67 @@ def create_torch_dataset(examples):
                 'value': self.values[idx],
                 'next_placement': self.next_placements[idx],
                 'next_piece_idx': self.next_piece_indices[idx],
+                'policy_candidates': self.policy_candidates[idx],
+                'policy_action_mask': self.policy_action_mask[idx],
+                'policy_target_idx': self.policy_target_idx[idx],
             }
 
     return PolycubeDataset(examples)
 
 
-def split_dataset(examples, val_fraction=0.15, seed=42):
+def split_dataset(examples, val_fraction=0.15, seed=42, group_key='instance_id'):
     """Split examples into train and validation sets.
 
     Args:
         examples: list of example dicts
         val_fraction: fraction for validation
         seed: random seed for reproducibility
+        group_key: if present in examples, split by group id to avoid leakage
 
     Returns:
         (train_examples, val_examples)
     """
+    if not examples:
+        return [], []
+
     rng = random.Random(seed)
-    shuffled = list(examples)
-    rng.shuffle(shuffled)
-    split_idx = int(len(shuffled) * (1 - val_fraction))
-    return shuffled[:split_idx], shuffled[split_idx:]
+    use_grouped_split = (
+        group_key is not None and any(group_key in ex for ex in examples)
+    )
+
+    if not use_grouped_split:
+        shuffled = list(examples)
+        rng.shuffle(shuffled)
+        split_idx = int(len(shuffled) * (1 - val_fraction))
+        return shuffled[:split_idx], shuffled[split_idx:]
+
+    # Group-aware split to prevent near-duplicate states from the same instance
+    # leaking across train/val.
+    groups = {}
+    for idx, ex in enumerate(examples):
+        gid = ex.get(group_key, f"__ungrouped_{idx}")
+        groups.setdefault(gid, []).append(ex)
+
+    group_ids = list(groups.keys())
+    rng.shuffle(group_ids)
+
+    target_val = int(len(examples) * val_fraction)
+    val_examples = []
+    train_examples = []
+    for gid in group_ids:
+        bucket = groups[gid]
+        if len(val_examples) < target_val:
+            val_examples.extend(bucket)
+        else:
+            train_examples.extend(bucket)
+
+    # Guard against degenerate tiny datasets.
+    if not val_examples and train_examples:
+        val_examples.append(train_examples.pop())
+    if not train_examples and val_examples:
+        train_examples.append(val_examples.pop())
+
+    return train_examples, val_examples
 
 
 # ── Quick-generation helper ───────────────────────────────────────────────────
@@ -624,6 +787,7 @@ def generate_soma_training_data(num_instances=100, num_negatives=2, max_pieces=1
             'pieces': SOMA_PIECES,
             'grid_size': 3,
             'solution': solutions[i % len(solutions)],
+            'instance_id': i,
         })
 
     examples = generate_training_data(

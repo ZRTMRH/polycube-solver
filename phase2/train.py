@@ -23,7 +23,7 @@ from phase2.nn_model import create_model, count_parameters
 from phase2.data_generator import (
     enumerate_polycubes, generate_puzzle_instances, generate_training_data,
     generate_soma_training_data, create_torch_dataset, split_dataset,
-    encode_state, encode_grid, encode_placement,
+    encode_state, encode_grid, encode_placement, _check_partial_solvability,
 )
 
 
@@ -37,7 +37,8 @@ def train(model, train_loader, val_loader, epochs=50, lr=1e-3,
           lambda_value=1.0, lambda_policy=1.0, device='cpu', verbose=True):
     """Train the CuboidNet model.
 
-    Loss = lambda_v * BCE(value_pred, label) + lambda_p * CE(policy_pred, target)
+    Loss = lambda_v * BCE(value_pred, label) +
+           lambda_p * CE(action_logits, target_action_index)
 
     Args:
         model: CuboidNet instance
@@ -139,8 +140,9 @@ def _run_epoch(model, loader, value_criterion, policy_criterion,
     for batch in loader:
         states = batch['state'].to(device)
         labels = batch['label'].to(device)
-        next_placements = batch['next_placement'].to(device)
-        next_piece_idx = batch['next_piece_idx'].to(device)
+        policy_candidates = batch['policy_candidates'].to(device)
+        policy_action_mask = batch['policy_action_mask'].to(device)
+        policy_target_idx = batch['policy_target_idx'].to(device)
 
         value_pred, policy_pred = model(states)
         value_pred = value_pred.squeeze(-1)
@@ -148,19 +150,18 @@ def _run_epoch(model, loader, value_criterion, policy_criterion,
         # Value loss: BCE on solvability prediction
         v_loss = value_criterion(value_pred, labels)
 
-        # Policy loss: CE on placement prediction
-        # Convert 3D placement target to flat index
-        grid_size = states.shape[-1]
-        target_flat = next_placements.view(next_placements.size(0), -1)
-        # Find the cell with value 1.0 as the target class
-        # For negative examples (label=0), next_piece_idx=-1, handled by ignore_index
-        target_indices = target_flat.argmax(dim=1)
-        # Mask out negative examples (no valid next move)
-        valid_policy = next_piece_idx >= 0
+        # Policy loss: CE over valid placement actions for each state.
+        # Action logits are derived by projecting cell logits onto placement masks.
+        action_logits = torch.bmm(
+            policy_candidates, policy_pred.unsqueeze(-1)
+        ).squeeze(-1)
+        action_logits = action_logits.masked_fill(~policy_action_mask, -1e9)
+
+        valid_policy = policy_target_idx >= 0
         if valid_policy.any():
             p_loss = policy_criterion(
-                policy_pred[valid_policy],
-                target_indices[valid_policy]
+                action_logits[valid_policy],
+                policy_target_idx[valid_policy]
             )
         else:
             p_loss = torch.tensor(0.0, device=device)
@@ -253,6 +254,7 @@ def load_model(name, device='cpu'):
 def run_supervised_training(grid_size=3, max_pieces=10,
                             num_instances=100, num_negatives=2,
                             epochs=50, lr=1e-3, batch_size=64,
+                            lambda_value=1.0, lambda_policy=1.0,
                             hidden_dim=128, num_residual_blocks=6,
                             device='cpu', save_name=None):
     """Run the full supervised training pipeline.
@@ -270,6 +272,8 @@ def run_supervised_training(grid_size=3, max_pieces=10,
         epochs: training epochs
         lr: learning rate
         batch_size: batch size
+        lambda_value: weight for value loss
+        lambda_policy: weight for policy loss
         hidden_dim: model hidden dimension
         num_residual_blocks: number of residual blocks
         device: 'cpu' or 'cuda'
@@ -306,7 +310,7 @@ def run_supervised_training(grid_size=3, max_pieces=10,
 
     # Step 2: Split and create datasets
     print(f"\n[Step 2] Splitting data ({len(examples)} examples)...")
-    train_ex, val_ex = split_dataset(examples)
+    train_ex, val_ex = split_dataset(examples, group_key='instance_id')
     print(f"  Train: {len(train_ex)}, Val: {len(val_ex)}")
 
     train_dataset = create_torch_dataset(train_ex)
@@ -328,7 +332,9 @@ def run_supervised_training(grid_size=3, max_pieces=10,
     print(f"\n[Step 4] Training for {epochs} epochs...")
     history = train(
         model, train_loader, val_loader,
-        epochs=epochs, lr=lr, device=device,
+        epochs=epochs, lr=lr,
+        lambda_value=lambda_value, lambda_policy=lambda_policy,
+        device=device,
     )
 
     # Step 5: Save
@@ -340,6 +346,8 @@ def run_supervised_training(grid_size=3, max_pieces=10,
             'num_instances': num_instances,
             'num_examples': len(examples),
             'epochs': epochs,
+            'lambda_value': lambda_value,
+            'lambda_policy': lambda_policy,
             'final_val_acc': history['val_value_acc'][-1],
         }
         save_model(model, save_name, history, metadata)
@@ -354,6 +362,10 @@ def run_supervised_training(grid_size=3, max_pieces=10,
 def run_adi_iteration(model, grid_size=3, max_pieces=10,
                       num_new_instances=50, beam_width=32,
                       adi_epochs=20, lr=5e-4, batch_size=64,
+                      lambda_value=1.0, lambda_policy=1.0,
+                      failed_label_mode='verify',
+                      failed_verify_fraction=0.15,
+                      failed_verify_max_states=16,
                       existing_examples=None,
                       device='cpu', verbose=True):
     """Run one round of Autodidactic Iteration (ADI).
@@ -373,6 +385,13 @@ def run_adi_iteration(model, grid_size=3, max_pieces=10,
         adi_epochs: epochs for ADI retraining
         lr: learning rate for retraining
         batch_size: batch size
+        lambda_value: weight for value loss
+        lambda_policy: weight for policy loss during ADI retraining
+        failed_label_mode: how to handle states from failed beam searches:
+            'verify' (default), 'skip', or 'negative' (legacy)
+        failed_verify_fraction: fraction of failed states to verify via DLX
+            when failed_label_mode='verify'
+        failed_verify_max_states: max failed states to verify per instance
         existing_examples: list of training examples from supervised phase
             (combined with ADI examples for retraining). If None, train only
             on ADI-collected data.
@@ -393,6 +412,9 @@ def run_adi_iteration(model, grid_size=3, max_pieces=10,
     new_examples = []
     n_solved = 0
     n_failed = 0
+    n_failed_labeled_neg = 0
+    n_failed_verified = 0
+    n_failed_skipped = 0
     zero_placement = np.zeros((grid_size, grid_size, grid_size), dtype=np.float32)
 
     for i in range(num_new_instances):
@@ -401,6 +423,7 @@ def run_adi_iteration(model, grid_size=3, max_pieces=10,
         perm = list(range(len(SOMA_PIECES)))
         _random.shuffle(perm)
         pieces = [SOMA_PIECES[j] for j in perm]
+        instance_id = f"adi_{i}"
 
         # Run beam search WITH trace collection
         solution, trace = nn_solve(
@@ -422,35 +445,47 @@ def run_adi_iteration(model, grid_size=3, max_pieces=10,
                     'next_placement': zero_placement,
                     'next_piece_idx': -1,  # no valid policy target for ADI examples
                     'grid_size': grid_size,
+                    'instance_id': instance_id,
                 })
         else:
             n_failed += 1
-            # States from a failed search → negative
-            # (the model thought these were promising but they led nowhere)
-            for entry in trace.get('pruned', []):
-                new_examples.append({
-                    'state': entry['state'],
-                    'grid': entry['grid'],
-                    'remaining_pieces': entry['remaining_pieces'],
-                    'label': 0.0,  # search failed from here
-                    'value': entry['value'],
-                    'next_placement': zero_placement,
-                    'next_piece_idx': -1,
-                    'grid_size': grid_size,
-                })
-            # Also label kept states from failed searches as negative
-            # (they were the "best" states but still led to failure)
-            for entry in trace.get('kept', []):
-                new_examples.append({
-                    'state': entry['state'],
-                    'grid': entry['grid'],
-                    'remaining_pieces': entry['remaining_pieces'],
-                    'label': 0.0,  # search failed even from the best states
-                    'value': entry['value'],
-                    'next_placement': zero_placement,
-                    'next_piece_idx': -1,
-                    'grid_size': grid_size,
-                })
+            failed_entries = list(trace.get('pruned', [])) + list(trace.get('kept', []))
+
+            if failed_label_mode == 'negative':
+                # Legacy behavior: label all failed-search states as negative.
+                for entry in failed_entries:
+                    new_examples.append({
+                        'state': entry['state'],
+                        'grid': entry['grid'],
+                        'remaining_pieces': entry['remaining_pieces'],
+                        'label': 0.0,
+                        'value': entry['value'],
+                        'next_placement': zero_placement,
+                        'next_piece_idx': -1,
+                        'grid_size': grid_size,
+                        'instance_id': instance_id,
+                    })
+                n_failed_labeled_neg += len(failed_entries)
+            elif failed_label_mode == 'verify':
+                added, verified, skipped = _verified_negative_examples_from_failed_trace(
+                    failed_entries=failed_entries,
+                    grid_size=grid_size,
+                    zero_placement=zero_placement,
+                    verify_fraction=failed_verify_fraction,
+                    verify_max_states=failed_verify_max_states,
+                    instance_id=instance_id,
+                )
+                new_examples.extend(added)
+                n_failed_labeled_neg += len(added)
+                n_failed_verified += verified
+                n_failed_skipped += skipped
+            elif failed_label_mode == 'skip':
+                n_failed_skipped += len(failed_entries)
+            else:
+                raise ValueError(
+                    f"Unknown failed_label_mode '{failed_label_mode}'. "
+                    f"Use 'verify', 'skip', or 'negative'."
+                )
 
         if verbose and (i + 1) % 10 == 0:
             print(f"  [{i+1}/{num_new_instances}] "
@@ -462,6 +497,13 @@ def run_adi_iteration(model, grid_size=3, max_pieces=10,
     print(f"\n  ADI collection done: {len(new_examples)} examples "
           f"({pos} positive, {neg} negative)")
     print(f"  Beam search solved {n_solved}/{num_new_instances} instances")
+    if failed_label_mode == 'verify':
+        print(f"  Failed-state handling: verified={n_failed_verified}, "
+              f"labeled_negative={n_failed_labeled_neg}, skipped={n_failed_skipped}")
+    elif failed_label_mode == 'skip':
+        print(f"  Failed-state handling: skipped={n_failed_skipped}")
+    else:
+        print(f"  Failed-state handling: labeled_negative={n_failed_labeled_neg}")
 
     if not new_examples:
         print("  No new examples generated from ADI.")
@@ -476,7 +518,7 @@ def run_adi_iteration(model, grid_size=3, max_pieces=10,
 
     # Retrain on combined dataset
     print(f"\n  Retraining for {adi_epochs} epochs...")
-    train_ex, val_ex = split_dataset(all_examples)
+    train_ex, val_ex = split_dataset(all_examples, group_key='instance_id')
     train_dataset = create_torch_dataset(train_ex)
     val_dataset = create_torch_dataset(val_ex)
 
@@ -485,10 +527,77 @@ def run_adi_iteration(model, grid_size=3, max_pieces=10,
 
     adi_history = train(
         model, train_loader, val_loader,
-        epochs=adi_epochs, lr=lr, device=device, verbose=verbose,
+        epochs=adi_epochs, lr=lr,
+        lambda_value=lambda_value, lambda_policy=lambda_policy,
+        device=device, verbose=verbose,
     )
 
     return model, adi_history, new_examples
+
+
+# ── ADI Verification Helpers ─────────────────────────────────────────────────
+
+def _verified_negative_examples_from_failed_trace(
+    failed_entries, grid_size, zero_placement, verify_fraction, verify_max_states,
+    instance_id
+):
+    """Create negatives only from failed states verified unsolvable by DLX."""
+    if not failed_entries:
+        return [], 0, 0
+
+    verify_fraction = max(0.0, min(1.0, verify_fraction))
+    sample_n = int(len(failed_entries) * verify_fraction)
+    if verify_fraction > 0.0 and sample_n == 0:
+        sample_n = 1
+    sample_n = min(sample_n, verify_max_states, len(failed_entries))
+    if sample_n <= 0:
+        return [], 0, len(failed_entries)
+
+    sampled = list(failed_entries)
+    np.random.shuffle(sampled)
+    sampled = sampled[:sample_n]
+
+    added = []
+    for entry in sampled:
+        if _is_state_unsolvable(entry, grid_size):
+            added.append({
+                'state': entry['state'],
+                'grid': entry['grid'],
+                'remaining_pieces': entry['remaining_pieces'],
+                'label': 0.0,
+                'value': entry['value'],
+                'next_placement': zero_placement,
+                'next_piece_idx': -1,
+                'grid_size': grid_size,
+                'instance_id': instance_id,
+            })
+
+    verified = sample_n
+    skipped = len(failed_entries) - sample_n
+    return added, verified, skipped
+
+
+def _is_state_unsolvable(entry, grid_size):
+    """Return True iff remaining pieces cannot fill current empty cells."""
+    grid = entry['grid']
+    remaining_pieces = entry['remaining_pieces']
+
+    occupied = set(tuple(idx) for idx in np.argwhere(grid > 0.5))
+    empty_cells = set(
+        (x, y, z)
+        for x in range(grid_size)
+        for y in range(grid_size)
+        for z in range(grid_size)
+        if (x, y, z) not in occupied
+    )
+
+    # Mismatched volume implies unsolvable under current encoding.
+    remaining_volume = sum(len(p) for p in remaining_pieces)
+    if remaining_volume != len(empty_cells):
+        return True
+
+    solvable = _check_partial_solvability(remaining_pieces, empty_cells, grid_size)
+    return not solvable
 
 
 # ── Plotting ──────────────────────────────────────────────────────────────────

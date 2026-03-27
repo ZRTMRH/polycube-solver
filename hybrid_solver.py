@@ -11,12 +11,54 @@ Strategy:
 import time
 import os
 import sys
+import multiprocessing as mp
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from phase1.solver import solve as dlx_solve, cube_root_int
 from phase2.nn_solver import nn_solve
 from phase2.train import load_model
+
+
+def _dlx_worker(pieces, grid_size, out_q):
+    """Worker process entrypoint for timeout-safe DLX solving."""
+    try:
+        sols = dlx_solve(pieces, grid_size=grid_size, find_all=False)
+        out_q.put(("ok", sols))
+    except Exception as exc:  # pragma: no cover - defensive path
+        out_q.put(("err", repr(exc)))
+
+
+def _run_dlx_with_timeout(pieces, grid_size, timeout_seconds):
+    """Run DLX in a separate process and enforce a hard timeout.
+
+    Returns:
+        (solutions, timed_out, error_message)
+    """
+    if timeout_seconds is None or timeout_seconds <= 0:
+        try:
+            return dlx_solve(pieces, grid_size=grid_size, find_all=False), False, None
+        except Exception as exc:  # pragma: no cover - defensive path
+            return [], False, repr(exc)
+
+    ctx = mp.get_context("spawn")
+    out_q = ctx.Queue()
+    proc = ctx.Process(target=_dlx_worker, args=(pieces, grid_size, out_q))
+    proc.start()
+    proc.join(timeout_seconds)
+
+    if proc.is_alive():
+        proc.terminate()
+        proc.join()
+        return [], True, None
+
+    if out_q.empty():
+        return [], False, "DLX worker exited without result"
+
+    status, payload = out_q.get()
+    if status == "ok":
+        return payload, False, None
+    return [], False, payload
 
 
 def hybrid_solve(pieces, grid_size=None, model_name="soma_3x3x3",
@@ -106,8 +148,28 @@ def hybrid_solve(pieces, grid_size=None, model_name="soma_3x3x3",
         print(f"\n[2] DLX exact cover solver...")
 
     t_dlx = time.time()
-    dlx_solutions = dlx_solve(pieces, grid_size=grid_size, find_all=False)
+    dlx_solutions, dlx_timed_out, dlx_error = _run_dlx_with_timeout(
+        pieces, grid_size, timeout_dlx
+    )
     dlx_time = time.time() - t_dlx
+
+    if dlx_timed_out:
+        if verbose:
+            print(f"    DLX timed out after {timeout_dlx}s")
+        return {
+            'solution': None,
+            'method': None,
+            'time': nn_time + dlx_time,
+        }
+
+    if dlx_error is not None:
+        if verbose:
+            print(f"    DLX error: {dlx_error}")
+        return {
+            'solution': None,
+            'method': None,
+            'time': nn_time + dlx_time,
+        }
 
     if dlx_solutions:
         if verbose:
