@@ -1,0 +1,299 @@
+
+import matplotlib.pyplot as plt
+
+# Phase 1 imports
+from phase1.polycube import get_orientations, get_all_placements
+from phase1.solver import solve
+from phase1.visualization import plot_solution, animate_solution, plot_pieces
+from phase1.test_cases import (
+    MONOMINO, DOMINO, L_TRICUBE, SOMA_PIECES,
+    verify_solution
+)
+# The L-tricube has how many distinct orientations?
+orientations = get_orientations(L_TRICUBE)
+print(f"L-tricube: {len(L_TRICUBE)} cubes, {len(orientations)} unique orientations")
+for i, o in enumerate(orientations):
+    print(f"  Orientation {i}: {sorted(o)}")
+pieces_2x2 = [DOMINO] * 4
+solutions = solve(pieces_2x2)
+
+if solutions:
+    sol = solutions[0]
+    print("\nSolution:")
+    for pidx, cells in sorted(sol.items()):
+        print(f"  Piece {pidx}: {sorted(cells)}")
+    assert verify_solution(sol, 2), "Solution verification failed!"
+    print("\nVerified: all cells covered exactly once.")
+fig, ax = plot_solution(sol, 2, title="2×2×2 Cube — 4 Dominoes")
+plt.show()
+# Visualize the 7 Soma pieces
+fig = plot_pieces(SOMA_PIECES, title="The 7 Soma Cube Pieces")
+plt.show()
+
+# Solve the Soma cube
+soma_solutions = solve(SOMA_PIECES)
+
+if soma_solutions:
+    soma_sol = soma_solutions[0]
+    print("\nSolution:")
+    for pidx, cells in sorted(soma_sol.items()):
+        print(f"  Piece {pidx}: {sorted(cells)}")
+    assert verify_solution(soma_sol, 3), "Solution verification failed!"
+    print("\nVerified: perfect 3×3×3 cube!")
+# Static visualization of the Soma solution
+fig, ax = plot_solution(soma_sol, 3, title="Soma Cube Solution")
+plt.show()
+# Animated assembly — pieces placed one at a time
+anim = animate_solution(soma_sol, 3, title="Soma Cube Assembly", interval=1000)
+plt.show()
+# 3 dominoes = 6 cubes — not a perfect cube
+impossible = solve([DOMINO] * 3)
+print(f"Solutions found: {len(impossible)}")
+import time
+
+t0 = time.time()
+all_soma = solve(SOMA_PIECES, find_all=True)
+elapsed = time.time() - t0
+
+print(f"\nTotal solutions: {len(all_soma)}")
+print(f"Unique (mod 48 symmetries): {len(all_soma) // 48}")
+print(f"Time: {elapsed:.2f}s")
+# Save the Soma animation as a GIF
+anim = animate_solution(soma_sol, 3, title="Soma Cube Assembly",
+                        interval=1000, save_path="soma_assembly.gif")
+from phase2.data_generator import enumerate_polycubes
+
+catalog = enumerate_polycubes(max_size=5)
+total = 0
+for size, polys in sorted(catalog.items()):
+    print(f"Size {size}: {len(polys):3d} free polycubes")
+    total += len(polys)
+print(f"Total: {total} polycubes (sizes 1-5)")
+from phase2.data_generator import generate_soma_training_data
+import numpy as np
+
+MAX_PIECES = 10  # max piece channels for encoding
+
+# Generate training data from Soma cube solutions
+examples = generate_soma_training_data(
+    num_instances=100, num_negatives=2, max_pieces=MAX_PIECES
+)
+
+pos = sum(1 for e in examples if e['label'] == 1.0)
+neg = sum(1 for e in examples if e['label'] == 0.0)
+print(f"\nDataset: {len(examples)} examples ({pos} positive, {neg} negative)")
+print(f"State tensor shape: {examples[0]['state'].shape}")
+print(f"  Channel 0: grid occupancy ({examples[0]['state'].shape[-3:]})")
+print(f"  Channels 1-{MAX_PIECES}: remaining piece shapes")
+# Visualize a training example: partial grid state
+fig, axes = plt.subplots(1, 3, figsize=(15, 4), subplot_kw={'projection': '3d'})
+
+for ax_idx, pieces_remaining in enumerate([7, 4, 1]):
+    # Find an example with this many remaining pieces
+    ex = next(e for e in examples if e['value'] == pieces_remaining and e['label'] == 1.0)
+    grid = ex['grid']
+    filled = grid > 0.5
+
+    ax = axes[ax_idx]
+    import matplotlib.colors as mcolors
+    facecolors = np.where(filled[..., np.newaxis],
+                          np.array(mcolors.to_rgba('#4363d8', alpha=0.7)),
+                          np.array([0, 0, 0, 0]))
+    edgecolors = np.where(filled[..., np.newaxis],
+                          np.array([0, 0, 0, 0.3]),
+                          np.array([0, 0, 0, 0]))
+    ax.voxels(filled, facecolors=facecolors, edgecolors=edgecolors)
+    placed = 7 - pieces_remaining
+    ax.set_title(f"{placed}/7 pieces placed\n({pieces_remaining} remaining)")
+    ax.set_xlim(0, 3); ax.set_ylim(0, 3); ax.set_zlim(0, 3)
+
+plt.suptitle("Training Examples: Partial Soma Cube States", fontsize=14)
+plt.tight_layout()
+plt.show()
+
+import torch
+from phase2.nn_model import create_model, model_summary
+
+# Create model for 3x3x3 grid with up to 10 piece channels
+model = create_model(grid_size=1, max_pieces=MAX_PIECES,
+                     num_residual_blocks=6, hidden_dim=128)
+total_params, trainable_params = model_summary(model, grid_size=3, max_pieces=MAX_PIECES)
+from phase2.data_generator import split_dataset, create_torch_dataset
+from phase2.train import train, save_model, plot_training_curves
+from torch.utils.data import DataLoader
+
+# Split data
+train_ex, val_ex = split_dataset(examples)
+print(f"Train: {len(train_ex)}, Val: {len(val_ex)}")
+
+train_dataset = create_torch_dataset(train_ex)
+val_dataset = create_torch_dataset(val_ex)
+train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
+val_loader = DataLoader(val_dataset, batch_size=64, shuffle=False)
+
+# Train
+history = train(model, train_loader, val_loader, epochs=50, lr=1e-3)
+
+# Save the trained model
+save_model(model, "soma_3x3x3", history, metadata={
+    'grid_size': 3, 'max_pieces': MAX_PIECES,
+    'num_examples': len(examples), 'epochs': 50,
+})
+# Plot training curves
+fig = plot_training_curves(history, title="CuboidNet Training (3x3x3 Soma Cube)")
+plt.show()
+from phase2.nn_solver import nn_solve
+
+# Solve Soma cube with NN beam search
+print("NN beam search on Soma cube...")
+t0 = time.time()
+nn_solution = nn_solve(SOMA_PIECES, grid_size=3, model=model,
+                       max_pieces=MAX_PIECES, beam_width=64, timeout=30.0)
+nn_time = time.time() - t0
+
+if nn_solution is not None:
+    print(f"NN solved in {nn_time:.3f}s!")
+    for pidx, cells in sorted(nn_solution.items()):
+        print(f"  Piece {pidx}: {sorted(cells)}")
+    assert verify_solution(nn_solution, 3), "NN solution verification failed!"
+    print("Verified: valid 3x3x3 cube!")
+else:
+    print(f"NN failed after {nn_time:.3f}s")
+
+# Compare with DLX
+print(f"\nDLX solver for comparison...")
+t0 = time.time()
+dlx_sol = solve(SOMA_PIECES)
+dlx_time = time.time() - t0
+print(f"DLX solved in {dlx_time:.3f}s")
+
+if nn_solution is not None:
+    print(f"\nNN time: {nn_time:.3f}s vs DLX time: {dlx_time:.3f}s")
+# Visualize the NN solution (if found)
+if nn_solution is not None:
+    fig, axes = plt.subplots(1, 2, figsize=(14, 6),
+                              subplot_kw={'projection': '3d'})
+    plot_solution(nn_solution, 3, title="NN Solver Solution", ax=axes[0])
+    plot_solution(dlx_sol[0], 3, title="DLX Solver Solution", ax=axes[1])
+    plt.suptitle("Soma Cube: NN vs DLX Solutions", fontsize=14)
+    plt.tight_layout()
+    plt.show()
+from phase2.data_generator import encode_state
+
+# Use the DLX solution to trace confidence through a known solution path
+dlx_solution = dlx_sol[0] if dlx_sol else soma_sol
+piece_order = sorted(dlx_solution.keys())
+
+confidences = []
+partial = {}
+
+for step, pidx in enumerate(piece_order):
+    # Remaining pieces (not yet placed)
+    remaining_indices = piece_order[step:]
+    remaining_pieces = [SOMA_PIECES[i] for i in remaining_indices]
+
+    # Encode state and get value prediction
+    from phase2.data_generator import encode_grid
+    grid = encode_grid(partial, 3)
+    state = encode_state(grid, remaining_pieces, 3, MAX_PIECES)
+    state_tensor = torch.tensor(state, dtype=torch.float32).unsqueeze(0)
+
+    with torch.no_grad():
+        value, _ = model(state_tensor)
+    conf = value.item()
+    confidences.append(conf)
+
+    # Place this piece
+    partial[pidx] = dlx_solution[pidx]
+
+# Final state (all placed)
+confidences.append(1.0)
+
+# Plot
+fig, ax = plt.subplots(figsize=(8, 4))
+steps = range(len(confidences))
+ax.plot(steps, confidences, 'o-', color='#4363d8', linewidth=2, markersize=8)
+ax.set_xlabel('Pieces Placed')
+ax.set_ylabel('P(solvable)')
+ax.set_title('NN Confidence Along Solution Path')
+ax.set_xticks(range(len(confidences)))
+ax.set_xticklabels([f'{i}\n({7-i} left)' for i in range(len(confidences))])
+ax.set_ylim(-0.05, 1.05)
+ax.axhline(y=0.5, color='gray', linestyle='--', alpha=0.5, label='Decision boundary')
+ax.legend()
+ax.grid(True, alpha=0.3)
+plt.tight_layout()
+plt.show()
+from hybrid_solver import hybrid_solve
+
+# Hybrid solve the Soma cube
+result = hybrid_solve(
+    SOMA_PIECES, grid_size=3,
+    model_name="soma_3x3x3",
+    beam_width=64, timeout_nn=30,
+)
+
+print(f"\nResult: solved via '{result['method']}' in {result['time']:.3f}s")
+
+if result['solution'] is not None:
+    assert verify_solution(result['solution'], 3), "Hybrid solution verification failed!"
+    print("Verified: valid 3x3x3 cube!")
+
+    fig, ax = plot_solution(result['solution'], 3,
+                            title=f"Hybrid Solver ({result['method'].upper()}) Solution")
+    plt.show()
+from phase2.train import run_adi_iteration, save_model, plot_training_curves
+
+# Measure pre-ADI solve rate with a narrow beam (to make it challenging)
+from phase2.nn_solver import nn_solve
+import random
+
+def measure_solve_rate(model, n_trials=20, beam_width=8, timeout=10.0):
+    """Solve rate with narrow beam — harder than the default beam_width=64."""
+    solved = 0
+    for _ in range(n_trials):
+        perm = list(range(len(SOMA_PIECES)))
+        random.shuffle(perm)
+        pieces = [SOMA_PIECES[j] for j in perm]
+        sol = nn_solve(pieces, 3, model, max_pieces=MAX_PIECES,
+                       beam_width=beam_width, timeout=timeout)
+        if sol is not None:
+            solved += 1
+    return solved / n_trials
+
+print("Pre-ADI solve rate (beam_width=8, 20 trials)...")
+pre_rate = measure_solve_rate(model, n_trials=20, beam_width=8)
+print(f"  Solve rate: {pre_rate:.0%}")
+# ADI Round 1: use a narrow beam (beam_width=8) to generate failures for learning
+# This produces both positive examples (from successes) and negative examples (from failures)
+model, adi_history_1, adi_examples_1 = run_adi_iteration(
+    model, grid_size=3, max_pieces=MAX_PIECES,
+    num_new_instances=30, beam_width=8,
+    adi_epochs=15, lr=1e-4, batch_size=64,
+    existing_examples=examples,  # combine with supervised data
+)
+
+save_model(model, "soma_3x3x3_adi1", adi_history_1)
+
+# see if round 1 in the culprit for catastrophic forgetting:
+print("Post-ADI Round 1 solve rate...")
+mid_rate = measure_solve_rate(model, n_trials=20, beam_width=8)
+print(f"  Solve rate: {mid_rate:.0%}")
+# ADI Round 1 training curves
+fig = plot_training_curves(adi_history_1, title="ADI Round 1 Training Curves")
+plt.show()
+# ADI Round 2
+model, adi_history_2, adi_examples_2 = run_adi_iteration(
+    model, grid_size=3, max_pieces=MAX_PIECES,
+    num_new_instances=30, beam_width=8,
+    adi_epochs=15, lr=1e-4, batch_size=64,
+    existing_examples=examples + adi_examples_1,  # always include original supervised data
+)
+
+save_model(model, "soma_3x3x3_adi2", adi_history_2)
+# Measure post-ADI solve rate with the same narrow beam
+print("Post-ADI solve rate (beam_width=8, 20 trials)...")
+post_rate = measure_solve_rate(model, n_trials=20, beam_width=8)
+print(f"  Solve rate: {post_rate:.0%}")
+
+print(f"\nImprovement: {pre_rate:.0%} → {post_rate:.0%}")

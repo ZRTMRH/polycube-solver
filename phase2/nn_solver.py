@@ -173,6 +173,9 @@ def nn_solve(pieces, grid_size, model, max_pieces=10, beam_width=32,
                     if return_search_trace:
                         return solution, search_trace
                     return solution
+                # Check if this state creates isolated pocketshec
+                if has_isolated_pockets(new_state.occupied, grid_size, new_state.remaining_pieces):
+                    continue  # skip this state entirely
 
                 candidates.append(new_state)
 
@@ -386,3 +389,52 @@ if __name__ == "__main__":
             print("No solution found by NN solver.")
     except FileNotFoundError:
         print("No trained model found. Run train.py first.")
+def has_isolated_pockets(occupied, grid_size, remaining_pieces):
+    """Check if empty space can be decomposed into fillable regions."""
+    empty_cells = set()
+    for x in range(grid_size):
+        for y in range(grid_size):
+            for z in range(grid_size):
+                if (x,y,z) not in occupied:
+                    empty_cells.add((x,y,z))
+    
+    # Find connected components of empty space
+    components = get_connected_components(empty_cells)
+    
+    remaining_sizes = [len(p) for p in remaining_pieces]
+    
+    # Each component's size must be achievable by some subset of remaining pieces
+    for component in components:
+        size = len(component)
+        if size < min(remaining_sizes):  # too small for any piece
+            return True  # isolated pocket — dead end, prune this branch
+    
+    return False
+
+def get_connected_components(empty_cells):
+    """Find connected components of empty cells using BFS."""
+    unvisited = set(empty_cells)
+    components = []
+    neighbors = [(1,0,0),(-1,0,0),(0,1,0),(0,-1,0),(0,0,1),(0,0,-1)]
+    
+    while unvisited:
+        # Start a new component
+        start = next(iter(unvisited))
+        component = set()
+        queue = [start]
+        
+        while queue:
+            cell = queue.pop()
+            if cell not in unvisited:
+                continue
+            unvisited.remove(cell)
+            component.add(cell)
+            x, y, z = cell
+            for dx, dy, dz in neighbors:
+                nb = (x+dx, y+dy, z+dz)
+                if nb in unvisited:
+                    queue.append(nb)
+        
+        components.append(component)
+    
+    return components
