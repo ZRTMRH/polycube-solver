@@ -1,9 +1,12 @@
 """
 Training data generation for the neural polycube solver.
 
-Generates solvable puzzle instances using DLX, then creates partial-state
-training examples (positive = solvable, negative = unsolvable) for
-supervised learning of value and policy networks.
+Supports two families of solvable-instance generation:
+- DLX-verified random piece multisets
+- Constructive cube partitions that are guaranteed solvable by design
+
+Both feed the same partial-state supervised pipeline
+(positive = solvable, negative = unsolvable).
 """
 
 import sys
@@ -12,6 +15,7 @@ import random
 import time
 from collections import deque
 from copy import deepcopy
+from functools import lru_cache
 
 import numpy as np
 
@@ -95,7 +99,7 @@ def _canonical_form(coords):
 
 def generate_puzzle_instances(num_instances, grid_size, polycube_catalog,
                               min_piece_size=3, max_piece_size=5,
-                              dlx_timeout=10.0, verbose=True):
+                              dlx_timeout=10.0, verbose=True, seed=None):
     """Generate solvable puzzle instances by random sampling + DLX verification.
 
     Strategy: randomly sample piece sets whose total volume = grid_size^3,
@@ -109,6 +113,7 @@ def generate_puzzle_instances(num_instances, grid_size, polycube_catalog,
         max_piece_size: maximum piece size to use
         dlx_timeout: max seconds for DLX per instance (skip if exceeded)
         verbose: print progress
+        seed: optional RNG seed for deterministic instance generation
 
     Returns:
         list of dicts: {
@@ -130,12 +135,13 @@ def generate_puzzle_instances(num_instances, grid_size, polycube_catalog,
     instances = []
     attempts = 0
     max_total_attempts = num_instances * 500  # prevent infinite loop
+    rng = random.Random(seed) if seed is not None else random
 
     while len(instances) < num_instances and attempts < max_total_attempts:
         attempts += 1
         # Randomly select pieces that sum to target volume
         pieces = _sample_piece_set(available_pieces, target_volume,
-                                   min_piece_size, max_piece_size)
+                                   min_piece_size, max_piece_size, rng)
         if pieces is None:
             continue
 
@@ -174,7 +180,7 @@ def generate_puzzle_instances(num_instances, grid_size, polycube_catalog,
     return instances
 
 
-def _sample_piece_set(available_pieces, target_volume, min_size, max_size):
+def _sample_piece_set(available_pieces, target_volume, min_size, max_size, rng):
     """Randomly select pieces that sum to exactly target_volume.
 
     Uses a greedy approach with random shuffling: pick random pieces until
@@ -190,7 +196,7 @@ def _sample_piece_set(available_pieces, target_volume, min_size, max_size):
         if not valid:
             break
 
-        piece = random.choice(valid)
+        piece = rng.choice(valid)
         pieces.append(piece)
         remaining -= len(piece)
 
@@ -228,6 +234,471 @@ def _solve_with_timeout(pieces, grid_size, timeout):
             signal.signal(signal.SIGALRM, old_handler)
 
     return solutions
+
+
+def _canonical_piece_key(piece):
+    """Canonical sortable key for one piece."""
+    return tuple(sorted(tuple(cell) for cell in piece))
+
+
+def _canonical_instance_key(grid_size, pieces):
+    """Canonical key for deduplicating piece multisets."""
+    parts = sorted(_canonical_piece_key(piece) for piece in pieces)
+    return (int(grid_size), tuple(parts))
+
+
+def _normalize_piece_local(piece):
+    """Normalize one absolute piece into relative coordinates."""
+    return list(normalize(piece))
+
+
+def _remaining_volume_feasible(rem):
+    """Return whether rem can be expressed as a sum of 3/4/5."""
+    if rem < 0:
+        return False
+    if rem == 0:
+        return True
+    for n3 in range(rem // 3 + 1):
+        for n4 in range((rem - 3 * n3) // 4 + 1):
+            rest = rem - 3 * n3 - 4 * n4
+            if rest >= 0 and rest % 5 == 0:
+                return True
+    return False
+
+
+def _sample_piece_sizes_345(rng, total):
+    """Sample a list of piece sizes in {3,4,5} summing to total."""
+    remain = total
+    sizes = []
+    guard = 0
+    while remain > 0 and guard < total * 3:
+        guard += 1
+        choices = [s for s in (3, 4, 5) if _remaining_volume_feasible(remain - s)]
+        if not choices:
+            return None
+        size = rng.choice(choices)
+        sizes.append(size)
+        remain -= size
+    if remain != 0:
+        return None
+    return sizes
+
+
+def _neighbors_in_grid(cell, grid_size):
+    """Return in-bounds 6-neighbors of a cell."""
+    x, y, z = cell
+    cand = [
+        (x + 1, y, z), (x - 1, y, z),
+        (x, y + 1, z), (x, y - 1, z),
+        (x, y, z + 1), (x, y, z - 1),
+    ]
+    return [
+        c for c in cand
+        if 0 <= c[0] < grid_size and 0 <= c[1] < grid_size and 0 <= c[2] < grid_size
+    ]
+
+
+def _grow_connected_piece(rng, remaining, grid_size, target_size):
+    """Grow one connected component of target_size from remaining cells."""
+    if len(remaining) < target_size:
+        return None
+
+    start = rng.choice(tuple(remaining))
+    comp = {start}
+    frontier = {nb for nb in _neighbors_in_grid(start, grid_size) if nb in remaining}
+
+    while len(comp) < target_size:
+        if not frontier:
+            return None
+        nxt = rng.choice(tuple(frontier))
+        frontier.discard(nxt)
+        if nxt in comp or nxt not in remaining:
+            continue
+        comp.add(nxt)
+        for nb in _neighbors_in_grid(nxt, grid_size):
+            if nb in remaining and nb not in comp:
+                frontier.add(nb)
+    return comp
+
+
+def _component_sizes(cells, grid_size):
+    """Return sizes of 6-connected components inside a cell set."""
+    unseen = set(cells)
+    sizes = []
+    while unseen:
+        start = unseen.pop()
+        stack = [start]
+        size = 1
+        while stack:
+            cur = stack.pop()
+            for nb in _neighbors_in_grid(cur, grid_size):
+                if nb in unseen:
+                    unseen.remove(nb)
+                    stack.append(nb)
+                    size += 1
+        sizes.append(size)
+    return sizes
+
+
+def _grow_connected_piece_shaped(rng, remaining, grid_size, target_size, mode="random"):
+    """Grow a connected piece with simple shape biases to increase diversity."""
+    if len(remaining) < target_size:
+        return None
+
+    start = rng.choice(tuple(remaining))
+    comp = {start}
+    frontier = {nb for nb in _neighbors_in_grid(start, grid_size) if nb in remaining}
+
+    while len(comp) < target_size:
+        if not frontier:
+            return None
+
+        frontier_list = list(frontier)
+        scored = []
+        for cell in frontier_list:
+            in_comp_neighbors = sum(
+                1 for nb in _neighbors_in_grid(cell, grid_size) if nb in comp
+            )
+            exposed_neighbors = sum(
+                1 for nb in _neighbors_in_grid(cell, grid_size)
+                if nb in remaining and nb not in comp
+            )
+            coord_span = sum(cell)
+
+            if mode == "compact":
+                score = (in_comp_neighbors * 5) - exposed_neighbors + rng.random()
+            elif mode == "stringy":
+                score = (exposed_neighbors * 3) - (in_comp_neighbors * 4) + rng.random()
+            elif mode == "planar":
+                score = (cell[2] * 2) + exposed_neighbors + rng.random()
+            else:
+                score = rng.random()
+            scored.append((score, coord_span, cell))
+
+        if mode in ("compact", "planar"):
+            _, _, nxt = max(scored)
+        elif mode == "stringy":
+            _, _, nxt = max(scored)
+        else:
+            nxt = rng.choice(frontier_list)
+
+        frontier.discard(nxt)
+        if nxt in comp or nxt not in remaining:
+            continue
+        comp.add(nxt)
+        for nb in _neighbors_in_grid(nxt, grid_size):
+            if nb in remaining and nb not in comp:
+                frontier.add(nb)
+    return comp
+
+
+def _sample_piece_sizes_diverse_345(rng, total):
+    """Sample 3/4/5 piece sizes with stronger diversity than uniform random picks."""
+    remain = total
+    sizes = []
+    guard = 0
+    while remain > 0 and guard < total * 5:
+        guard += 1
+        choices = [s for s in (3, 4, 5) if _remaining_volume_feasible(remain - s)]
+        if not choices:
+            return None
+
+        if remain >= 30:
+            weights = {3: 4, 4: 5, 5: 3}
+        elif remain >= 15:
+            weights = {3: 4, 4: 4, 5: 3}
+        else:
+            weights = {3: 3, 4: 3, 5: 3}
+
+        weighted_choices = [c for c in choices for _ in range(weights[c])]
+        size = rng.choice(weighted_choices)
+        sizes.append(size)
+        remain -= size
+    if remain != 0:
+        return None
+    rng.shuffle(sizes)
+    return sizes
+
+
+def _build_connected_constructive_solution(grid_size, seed):
+    """Construct one guaranteed-solvable tiling via random connected partitions."""
+    rng = random.Random(seed)
+    total = grid_size ** 3
+
+    for _ in range(600):
+        if grid_size >= 5:
+            sizes = _sample_piece_sizes_diverse_345(rng, total)
+        else:
+            sizes = _sample_piece_sizes_345(rng, total)
+        if not sizes:
+            continue
+
+        remaining = {
+            (x, y, z)
+            for x in range(grid_size)
+            for y in range(grid_size)
+            for z in range(grid_size)
+        }
+        pieces = []
+
+        ok = True
+        for size in sizes:
+            comp = None
+            modes = ["random", "compact", "stringy", "planar"]
+            if grid_size <= 4:
+                modes = ["random", "compact", "stringy"]
+
+            for _grow_try in range(36 if grid_size >= 5 else 16):
+                mode = rng.choice(modes)
+                candidate = _grow_connected_piece_shaped(
+                    rng, remaining, grid_size, size, mode=mode
+                )
+                if candidate is None:
+                    continue
+                rem_after = remaining - candidate
+                comp_sizes = _component_sizes(rem_after, grid_size) if rem_after else []
+                if all(_remaining_volume_feasible(sz) for sz in comp_sizes):
+                    comp = candidate
+                    break
+            if comp is None:
+                ok = False
+                break
+
+            remaining -= comp
+            pieces.append(sorted(comp))
+
+        if ok and not remaining:
+            return pieces
+
+    raise RuntimeError(
+        f"Failed to construct connected case for grid_size={grid_size} after retries."
+    )
+
+
+@lru_cache(maxsize=None)
+def _line_size_partitions(length):
+    """All ordered partitions of length into segment sizes {3,4,5}."""
+    if length == 0:
+        return ((),)
+    parts = []
+    for size in (3, 4, 5):
+        if length - size < 0:
+            continue
+        for tail in _line_size_partitions(length - size):
+            parts.append((size,) + tail)
+    return tuple(parts)
+
+
+def _build_striped_constructive_solution(grid_size, seed):
+    """Construct a guaranteed-solvable rod-striped tiling."""
+    rng = random.Random(seed)
+    patterns = _line_size_partitions(grid_size)
+    if not patterns:
+        raise RuntimeError(f"No 3/4/5 line partitions exist for grid_size={grid_size}")
+
+    axis = rng.choice(("x", "y", "z"))
+    pieces = []
+
+    def append_line_segments(fixed_a, fixed_b, pattern):
+        pos = 0
+        for seg_len in pattern:
+            if axis == "x":
+                piece = [(pos + t, fixed_a, fixed_b) for t in range(seg_len)]
+            elif axis == "y":
+                piece = [(fixed_a, pos + t, fixed_b) for t in range(seg_len)]
+            else:
+                piece = [(fixed_a, fixed_b, pos + t) for t in range(seg_len)]
+            pieces.append(piece)
+            pos += seg_len
+
+    for a in range(grid_size):
+        for b in range(grid_size):
+            append_line_segments(a, b, rng.choice(patterns))
+
+    return pieces
+
+
+def _axis_permute(pieces, perm):
+    """Permute axes of a list of absolute pieces."""
+    out = []
+    for piece in pieces:
+        out.append([tuple(cell[i] for i in perm) for cell in piece])
+    return out
+
+
+def _emit_two_piece_mixed_segment(pos, y0, y1, z, seg_len):
+    """Partition a 2 x seg_len strip into two connected mostly non-rod pieces."""
+    if seg_len == 3:
+        a = [(pos, y0, z), (pos + 1, y0, z), (pos, y1, z)]
+        b = [(pos + 1, y1, z), (pos + 2, y0, z), (pos + 2, y1, z)]
+        return a, b
+    if seg_len == 4:
+        a = [(pos, y0, z), (pos + 1, y0, z), (pos, y1, z), (pos + 1, y1, z)]
+        b = [(pos + 2, y0, z), (pos + 3, y0, z), (pos + 2, y1, z), (pos + 3, y1, z)]
+        return a, b
+    if seg_len == 5:
+        a = [
+            (pos, y0, z), (pos + 1, y0, z), (pos + 2, y0, z),
+            (pos, y1, z), (pos + 1, y1, z),
+        ]
+        b = [
+            (pos + 2, y1, z), (pos + 3, y0, z), (pos + 4, y0, z),
+            (pos + 3, y1, z), (pos + 4, y1, z),
+        ]
+        return a, b
+    raise ValueError(f"Unsupported segment length: {seg_len}")
+
+
+def _build_mixed_constructive_solution(grid_size, seed):
+    """Construct a guaranteed-solvable tiling with mixed non-rod shapes."""
+    rng = random.Random(seed)
+    patterns = _line_size_partitions(grid_size)
+    if not patterns:
+        raise RuntimeError(f"No 3/4/5 line partitions exist for grid_size={grid_size}")
+
+    pieces = []
+    for z in range(grid_size):
+        for y in range(0, grid_size - 1, 2):
+            pattern = rng.choice(patterns)
+            pos = 0
+            for seg_len in pattern:
+                a, b = _emit_two_piece_mixed_segment(pos, y, y + 1, z, seg_len)
+                if rng.random() < 0.5:
+                    pieces.extend([a, b])
+                else:
+                    pieces.extend([b, a])
+                pos += seg_len
+
+        if grid_size % 2 == 1:
+            y = grid_size - 1
+            pattern = rng.choice(patterns)
+            pos = 0
+            for seg_len in pattern:
+                pieces.append([(pos + t, y, z) for t in range(seg_len)])
+                pos += seg_len
+
+    perms = (
+        (0, 1, 2), (0, 2, 1),
+        (1, 0, 2), (1, 2, 0),
+        (2, 0, 1), (2, 1, 0),
+    )
+    return _axis_permute(pieces, rng.choice(perms))
+
+
+def _constructive_instance_from_absolute_pieces(abs_pieces, grid_size, instance_id, source):
+    """Convert absolute constructive pieces into training-instance format."""
+    pieces = [_normalize_piece_local(piece) for piece in abs_pieces]
+    solution = {
+        pidx: frozenset(tuple(cell) for cell in piece)
+        for pidx, piece in enumerate(abs_pieces)
+    }
+    return {
+        'pieces': pieces,
+        'grid_size': grid_size,
+        'solution': solution,
+        'instance_id': instance_id,
+        'instance_source': source,
+    }
+
+
+def generate_constructive_puzzle_instances(num_instances, grid_size, seed=42,
+                                           large_suite_type='mixed',
+                                           verbose=True,
+                                           allow_duplicate_fallback=True):
+    """Generate guaranteed-solvable instances by constructive partitioning.
+
+    The returned piece coordinates are normalized local shapes, while the
+    solution stores the absolute placement used during construction.
+    """
+    rng = random.Random(seed)
+    instances = []
+    seen = set()
+
+    attempts = 0
+    max_attempts = max(100, num_instances * max(40, grid_size * 20))
+    duplicate_fallback_threshold = max(50, num_instances * 4)
+    while len(instances) < num_instances and attempts < max_attempts:
+        attempts += 1
+        local_seed = rng.randint(0, 10 ** 9)
+
+        constructors = []
+        if grid_size >= 7:
+            if large_suite_type == 'striped':
+                constructors = [
+                    ('striped_constructive', _build_striped_constructive_solution),
+                ]
+            else:
+                constructors = [
+                    ('mixed_constructive', _build_mixed_constructive_solution),
+                    ('striped_constructive', _build_striped_constructive_solution),
+                ]
+        elif grid_size >= 5:
+            if large_suite_type == 'striped':
+                constructors = [
+                    ('striped_constructive', _build_striped_constructive_solution),
+                ]
+            else:
+                constructors = [
+                    ('connected_constructive', _build_connected_constructive_solution),
+                    ('connected_constructive', _build_connected_constructive_solution),
+                    ('mixed_constructive', _build_mixed_constructive_solution),
+                    ('striped_constructive', _build_striped_constructive_solution),
+                ]
+        else:
+            constructors = [
+                ('connected_constructive', _build_connected_constructive_solution),
+                ('mixed_constructive', _build_mixed_constructive_solution),
+                ('striped_constructive', _build_striped_constructive_solution),
+            ]
+
+        abs_pieces = None
+        source = None
+        for source_name, builder in constructors:
+            try:
+                abs_pieces = builder(grid_size, local_seed)
+                source = source_name
+                break
+            except RuntimeError:
+                continue
+
+        if abs_pieces is None:
+            continue
+
+        rel_pieces = [_normalize_piece_local(piece) for piece in abs_pieces]
+        key = _canonical_instance_key(grid_size, rel_pieces)
+        is_duplicate = key in seen
+        if is_duplicate:
+            if not allow_duplicate_fallback or attempts < duplicate_fallback_threshold:
+                continue
+        else:
+            seen.add(key)
+
+        instances.append(
+            _constructive_instance_from_absolute_pieces(
+                abs_pieces=abs_pieces,
+                grid_size=grid_size,
+                instance_id=len(instances),
+                source=(
+                    f"{source}_duplicate_fallback"
+                    if is_duplicate else source
+                ),
+            )
+        )
+        if verbose:
+            print(
+                f"  Constructive instance {len(instances)}/{num_instances} "
+                f"built via "
+                f"{source}{' [dup-ok]' if is_duplicate else ''} "
+                f"(attempt {attempts}, {len(abs_pieces)} pieces)"
+            )
+
+    if len(instances) < num_instances:
+        raise RuntimeError(
+            f"Only built {len(instances)}/{num_instances} constructive instances "
+            f"for grid_size={grid_size} after {attempts} attempts."
+        )
+
+    return instances
 
 
 # ── State Encoding ────────────────────────────────────────────────────────────
@@ -366,6 +837,31 @@ def build_policy_candidates(grid, next_piece, target_placement, grid_size):
     return action_masks, target_idx
 
 
+def _pick_mrv_piece_local_idx(grid, remaining_pieces, grid_size):
+    """Pick local index of MRV piece under current grid occupancy.
+
+    Returns:
+        local index into remaining_pieces, or None if any piece has zero valid placements.
+    """
+    occupied = set(tuple(idx) for idx in np.argwhere(grid > 0.5))
+    best_idx = None
+    best_count = float('inf')
+
+    for local_idx, piece in enumerate(remaining_pieces):
+        count = 0
+        for placement in get_all_placements(piece, grid_size):
+            if not (placement & occupied):
+                count += 1
+        if count == 0:
+            return None
+        # Deterministic tie-break by local index.
+        if count < best_count:
+            best_count = count
+            best_idx = local_idx
+
+    return best_idx
+
+
 # ── Training Data Generation ─────────────────────────────────────────────────
 
 def generate_training_data(instances, max_pieces, num_negatives_per_solution=2,
@@ -412,10 +908,15 @@ def generate_training_data(instances, max_pieces, num_negatives_per_solution=2,
             placed_solution = {i: solution[i] for i in placed_indices}
             grid = encode_grid(placed_solution, grid_size)
 
-            # The next move: place the next piece
-            next_piece_idx_in_remaining = 0  # first remaining piece
+            # The next move: match the solver's MRV piece selection.
+            next_piece_idx_in_remaining = _pick_mrv_piece_local_idx(
+                grid, remaining_pieces_list, grid_size
+            )
+            if next_piece_idx_in_remaining is None:
+                continue
             next_piece = remaining_pieces_list[next_piece_idx_in_remaining]
-            next_placement = solution[piece_idx]
+            next_orig_idx = remaining_indices[next_piece_idx_in_remaining]
+            next_placement = solution[next_orig_idx]
             policy_candidates, policy_target_idx = build_policy_candidates(
                 grid, next_piece, next_placement, grid_size
             )
