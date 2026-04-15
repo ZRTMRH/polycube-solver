@@ -42,6 +42,10 @@ class Case:
     grid_size: int
     pieces: List[Piece]
     expected_solvable: bool
+    # Optional metadata used by the A+-target fixture. Defaults keep
+    # backward compatibility with code that constructs Case positionally.
+    stratum: str = ""
+    generator: str = ""
 
 
 @dataclass
