@@ -270,10 +270,16 @@ def _solve_line_rod_planner(pieces, grid_size):
 
 def _block_size_profiles_125():
     """All count triples (n3,n4,n5) such that 3*n3 + 4*n4 + 5*n5 = 125."""
+    return _block_size_profiles(125)
+
+
+@lru_cache(maxsize=16)
+def _block_size_profiles(volume):
+    """All count triples (n3,n4,n5) such that 3*n3 + 4*n4 + 5*n5 = volume."""
     profiles = []
-    for n3 in range(0, 125 // 3 + 1):
-        for n4 in range(0, 125 // 4 + 1):
-            rem = 125 - 3 * n3 - 4 * n4
+    for n3 in range(0, volume // 3 + 1):
+        for n4 in range(0, (volume - 3 * n3) // 4 + 1):
+            rem = volume - 3 * n3 - 4 * n4
             if rem < 0 or rem % 5 != 0:
                 continue
             n5 = rem // 5
@@ -294,7 +300,12 @@ def _bounds_feasible(r3, r4, r5, blocks_left, minmax):
 
 def _allocate_block_profiles_125(num_blocks, c3, c4, c5):
     """Greedy profile allocation for block volume 125."""
-    profiles = _block_size_profiles_125()
+    return _allocate_block_profiles(num_blocks, c3, c4, c5, 125)
+
+
+def _allocate_block_profiles(num_blocks, c3, c4, c5, volume):
+    """Greedy profile allocation for blocks of given volume."""
+    profiles = _block_size_profiles(volume)
     minmax = (
         (min(p[0] for p in profiles), max(p[0] for p in profiles)),
         (min(p[1] for p in profiles), max(p[1] for p in profiles)),
@@ -504,6 +515,182 @@ def _solve_blockwise_5cube(
             best_fail = fail_info
 
     best_fail['reason'] = f"block_planner_failed:{best_fail.get('reason')}"
+    return None, best_fail
+
+
+def _find_block_sizes(grid_size, min_block=5, max_block_vol=512):
+    """Find valid block sizes for a grid, sorted smallest-first.
+
+    A valid block size d satisfies:
+      - grid_size % d == 0
+      - d >= min_block  (pieces of size 5 need at least extent 5)
+      - d³ <= max_block_vol  (keep sub-problems DLX-tractable)
+      - d < grid_size  (decomposing into 1 block is pointless)
+    """
+    candidates = []
+    for d in range(min_block, grid_size):
+        if grid_size % d == 0 and d ** 3 <= max_block_vol:
+            candidates.append(d)
+    return candidates
+
+
+def _solve_blockwise_general(
+    pieces,
+    grid_size,
+    block_size,
+    device='cpu',
+    block_timeout_dlx=8.0,
+    block_timeout_nn=0.0,
+    trials=3,
+    retries_per_block=3,
+):
+    """Solve large cubes by decomposing into independent block_size³ sub-problems."""
+    if grid_size % block_size != 0 or block_size < 5:
+        return None, {'reason': 'unsupported_grid', 'blocks_total': 0, 'blocks_solved': 0}
+
+    block_volume = block_size ** 3
+
+    size_to_indices = {3: [], 4: [], 5: []}
+    for idx, piece in enumerate(pieces):
+        s = len(piece)
+        if s not in size_to_indices:
+            return None, {'reason': f'unsupported_piece_size_{s}',
+                          'blocks_total': 0, 'blocks_solved': 0}
+        size_to_indices[s].append(idx)
+
+    c3, c4, c5 = len(size_to_indices[3]), len(size_to_indices[4]), len(size_to_indices[5])
+    if 3 * c3 + 4 * c4 + 5 * c5 != grid_size ** 3:
+        return None, {'reason': 'volume_mismatch', 'blocks_total': 0, 'blocks_solved': 0}
+
+    nblk = grid_size // block_size
+    num_blocks = nblk ** 3
+    profiles = _allocate_block_profiles(num_blocks, c3, c4, c5, block_volume)
+    if profiles is None:
+        return None, {'reason': 'profile_allocation_failed',
+                      'blocks_total': num_blocks, 'blocks_solved': 0}
+
+    block_coords = [
+        (bx, by, bz)
+        for bx in range(nblk)
+        for by in range(nblk)
+        for bz in range(nblk)
+    ]
+
+    best_fail = {
+        'reason': 'block_unsolved',
+        'blocks_total': num_blocks,
+        'blocks_solved': 0,
+        'failed_block': None,
+        'trial': 0,
+    }
+    base_seed = grid_size * 1009 + len(pieces) * 9173 + block_size * 7
+
+    for trial in range(max(1, int(trials))):
+        rng = random.Random(base_seed + trial)
+        pools = {
+            3: list(size_to_indices[3]),
+            4: list(size_to_indices[4]),
+            5: list(size_to_indices[5]),
+        }
+        rng.shuffle(pools[3])
+        rng.shuffle(pools[4])
+        rng.shuffle(pools[5])
+
+        global_solution = {}
+        solved_blocks = 0
+        fail_info = None
+
+        for block_id, (bx, by, bz) in enumerate(block_coords):
+            p3, p4, p5 = profiles[block_id]
+            block_solved = False
+
+            for retry in range(max(1, int(retries_per_block))):
+                if len(pools[3]) < p3 or len(pools[4]) < p4 or len(pools[5]) < p5:
+                    fail_info = {
+                        'reason': 'pool_underflow',
+                        'blocks_total': num_blocks,
+                        'blocks_solved': solved_blocks,
+                        'failed_block': (bx, by, bz),
+                        'trial': trial,
+                    }
+                    break
+
+                if retry == 0:
+                    sel3 = pools[3][:p3]
+                    sel4 = pools[4][:p4]
+                    sel5 = pools[5][:p5]
+                else:
+                    sel3 = rng.sample(pools[3], p3) if p3 > 0 else []
+                    sel4 = rng.sample(pools[4], p4) if p4 > 0 else []
+                    sel5 = rng.sample(pools[5], p5) if p5 > 0 else []
+                idxs = sel3 + sel4 + sel5
+                block_pieces = [pieces[i] for i in idxs]
+
+                block_res = hybrid_solve(
+                    block_pieces,
+                    grid_size=block_size,
+                    model_name=None,
+                    beam_width=0,
+                    timeout_nn=block_timeout_nn,
+                    timeout_dlx=block_timeout_dlx,
+                    device=device,
+                    verbose=False,
+                )
+                block_sol = block_res.get('solution')
+                if block_sol is None:
+                    continue
+
+                ox, oy, oz = block_size * bx, block_size * by, block_size * bz
+                for local_pidx, cells in block_sol.items():
+                    global_idx = idxs[local_pidx]
+                    shifted = frozenset((x + ox, y + oy, z + oz) for x, y, z in cells)
+                    global_solution[global_idx] = shifted
+
+                for i in sel3:
+                    pools[3].remove(i)
+                for i in sel4:
+                    pools[4].remove(i)
+                for i in sel5:
+                    pools[5].remove(i)
+                solved_blocks += 1
+                block_solved = True
+                break
+
+            if fail_info is not None:
+                break
+            if not block_solved:
+                fail_info = {
+                    'reason': 'block_unsolved',
+                    'blocks_total': num_blocks,
+                    'blocks_solved': solved_blocks,
+                    'failed_block': (bx, by, bz),
+                    'trial': trial,
+                }
+                break
+
+        if fail_info is None:
+            if len(global_solution) != len(pieces):
+                fail_info = {
+                    'reason': 'incomplete_global_solution',
+                    'blocks_total': num_blocks,
+                    'blocks_solved': solved_blocks,
+                    'failed_block': None,
+                    'trial': trial,
+                }
+            else:
+                return global_solution, {
+                    'reason': None,
+                    'blocks_total': num_blocks,
+                    'blocks_solved': solved_blocks,
+                    'block_size': block_size,
+                    'trial': trial,
+                }
+
+        if fail_info.get('blocks_solved', 0) > best_fail.get('blocks_solved', 0):
+            best_fail = fail_info
+
+    best_fail['reason'] = f"block_planner_failed:{best_fail.get('reason')}"
+    best_fail['block_size'] = block_size
     return None, best_fail
 
 
@@ -1250,7 +1437,7 @@ def solve_size_gated(
     exact_first_max_grid=6,
     exact_first_timeout=30.0,
     large_allow_dlx=False,
-    allow_preplaced_fastpath=False,
+    allow_preplaced_fastpath=True,
     block_planner_enabled=True,
     block_timeout_dlx=8.0,
     block_timeout_nn=0.0,
@@ -1311,40 +1498,115 @@ def solve_size_gated(
             'time': time.time() - t0,
         }
 
-    # First large-tier planner primitive: exact line packing for rod-only sets.
+    # Fast planners: try at ALL grid sizes before falling into DLX/hybrid routing.
+    # These are O(N²) or faster and detect structural patterns in the input.
     planner_diag = None
-    if grid_size > exact_first_max_grid:
-        planner_solution = _solve_line_rod_planner(pieces, grid_size)
-        if planner_solution is not None:
+
+    # Slab planner: all pieces are flat (extent 1 along one axis).
+    try:
+        from block_planner_v2 import (
+            solve_slab_planner, solve_slab_sequential, solve_slab_layered,
+            solve_slab_paired,
+        )
+        # Hint-based slab planner (fast, uses absolute coordinates).
+        slab_solution, slab_diag = solve_slab_planner(pieces, grid_size, slab_timeout=5.0)
+        if slab_solution is not None:
             return {
-                'solution': planner_solution,
+                'solution': slab_solution,
                 'method': 'planner',
-                'submethod': 'rod_line_planner',
+                'submethod': 'slab_planner_v2',
                 'controller': 'size_gated',
-                'tier': 'large_planner',
+                'tier': 'fast_planner',
                 'time': time.time() - t0,
+                'planner_diag': slab_diag,
             }
-        if block_planner_enabled:
-            block_solution, block_diag = _solve_blockwise_5cube(
-                pieces=pieces,
-                grid_size=grid_size,
-                device=device,
-                block_timeout_dlx=block_timeout_dlx,
-                block_timeout_nn=block_timeout_nn,
-                trials=block_planner_trials,
-                retries_per_block=block_retries_per_block,
+        # Hint-free solvers for normalized/relative pieces (no coordinate hints).
+        if (slab_diag.get('slab_axis') is not None
+                and slab_diag.get('reason') != 'no_slab_axis'):
+            # Fast path: pair-based constructive tiling (O(N²) per slab).
+            # Handles mixed (L/SQ/P pairs) and all-rod (striped) cases.
+            paired_sol, paired_diag = solve_slab_paired(
+                pieces, grid_size, total_timeout=10.0, max_retries=5,
             )
-            if block_solution is not None:
+            if paired_sol is not None:
                 return {
-                    'solution': block_solution,
+                    'solution': paired_sol,
                     'method': 'planner',
-                    'submethod': 'blockwise_5cube',
+                    'submethod': 'slab_paired',
                     'controller': 'size_gated',
-                    'tier': 'large_planner',
+                    'tier': 'fast_planner',
                     'time': time.time() - t0,
-                    'planner_diag': block_diag,
+                    'planner_diag': paired_diag,
                 }
-            planner_diag = block_diag
+            # Fallback: strip-by-strip 2D DLX with shape-balanced partitioning.
+            layered_timeout = min(180.0, max(30.0, grid_size * 10.0))
+            layered_solution, layered_diag = solve_slab_layered(
+                pieces, grid_size,
+                slab_timeout=max(10.0, layered_timeout / grid_size),
+                total_timeout=layered_timeout,
+                max_retries=50,
+            )
+            if layered_solution is not None:
+                return {
+                    'solution': layered_solution,
+                    'method': 'planner',
+                    'submethod': 'slab_layered',
+                    'controller': 'size_gated',
+                    'tier': 'fast_planner',
+                    'time': time.time() - t0,
+                    'planner_diag': layered_diag,
+                }
+    except ImportError:
+        pass
+
+    # Rod planner: all pieces are straight lines (fallback for non-slab rods).
+    planner_solution = _solve_line_rod_planner(pieces, grid_size)
+    if planner_solution is not None:
+        return {
+            'solution': planner_solution,
+            'method': 'planner',
+            'submethod': 'rod_line_planner',
+            'controller': 'size_gated',
+            'tier': 'fast_planner',
+            'time': time.time() - t0,
+        }
+
+    # Block decomposition planners (large grids only).
+    if grid_size > exact_first_max_grid:
+        if block_planner_enabled:
+            # Try all valid block sizes, smallest first (smallest = fastest sub-problems).
+            # max_block_vol=512 means block_size up to 8 (8³=512).
+            block_sizes = _find_block_sizes(grid_size, min_block=5, max_block_vol=512)
+            for bs in block_sizes:
+                # Scale timeout with block volume: larger blocks need more time.
+                scale = max(1.0, (bs ** 3) / 125.0)
+                bs_timeout = block_timeout_dlx * scale
+                # More pieces → more trials needed to find a compatible assignment.
+                adaptive_trials = max(block_planner_trials,
+                                      min(10, len(pieces) // 50))
+                adaptive_retries = max(block_retries_per_block,
+                                       min(8, len(pieces) // 80))
+                block_solution, block_diag = _solve_blockwise_general(
+                    pieces=pieces,
+                    grid_size=grid_size,
+                    block_size=bs,
+                    device=device,
+                    block_timeout_dlx=bs_timeout,
+                    block_timeout_nn=block_timeout_nn,
+                    trials=adaptive_trials,
+                    retries_per_block=adaptive_retries,
+                )
+                if block_solution is not None:
+                    return {
+                        'solution': block_solution,
+                        'method': 'planner',
+                        'submethod': f'blockwise_{bs}cube',
+                        'controller': 'size_gated',
+                        'tier': 'large_planner',
+                        'time': time.time() - t0,
+                        'planner_diag': block_diag,
+                    }
+                planner_diag = block_diag
 
     if grid_size <= exact_only_max_grid:
         sols, timed_out, err = _run_dlx_with_timeout(pieces, grid_size, timeout_dlx)
@@ -1429,6 +1691,24 @@ def solve_size_gated(
         res['controller'] = 'size_gated'
         res['tier'] = 'medium_exact_first'
         return res
+
+    # Safety net: for medium grids (≤9) that reached the large tier because
+    # exact_first_max_grid was set lower, try DLX before giving up.
+    # DLX handles N=7 in ~6s, N=9 in ~30s for genuinely 3D pieces.
+    if grid_size <= 9:
+        dlx_budget = min(timeout_dlx, 90.0)
+        fallback_sols, fb_timed_out, fb_err = _run_dlx_with_timeout(
+            pieces, grid_size, dlx_budget,
+        )
+        if fallback_sols:
+            return {
+                'solution': fallback_sols[0],
+                'method': 'dlx',
+                'submethod': 'dlx_large_fallback',
+                'controller': 'size_gated',
+                'tier': 'large_dlx_fallback',
+                'time': time.time() - t0,
+            }
 
     # Large-cube tier: by default avoid exact fallback if no large model exists.
     if not model_name and not large_allow_dlx:

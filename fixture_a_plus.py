@@ -308,6 +308,7 @@ def run_fixture_grading(
     timeout_dlx: float = 20.0,
     timeout_per_case: float = 60.0,
     verbose: bool = True,
+    extra_solver_kwargs: dict | None = None,
 ):
     """Run the solver against every fixture case. Score correctness.
 
@@ -319,6 +320,8 @@ def run_fixture_grading(
     """
     import time
     from grading_harness import _default_solver, _extract_solution_obj, verify_solution
+
+    extra_solver_kwargs = extra_solver_kwargs or {}
 
     results = []
     for i, case in enumerate(cases):
@@ -334,6 +337,7 @@ def run_fixture_grading(
                 beam_width=beam_width,
                 timeout_nn=min(timeout_nn, timeout_per_case),
                 timeout_dlx=min(timeout_dlx, timeout_per_case),
+                **extra_solver_kwargs,
             )
         except Exception as e:
             raw = {"solution": None, "method": None,
