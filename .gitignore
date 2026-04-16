@@ -33,3 +33,6 @@ Thumbs.db
 /solver.py
 /test_cases.py
 /visualization.py
+venv311/
+venv*/
+venv*/
