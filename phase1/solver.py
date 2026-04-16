@@ -3,7 +3,7 @@ Main solver: formulate the polycube packing problem as an exact cover
 instance and solve it with DLX.
 """
 
-from .polycube import get_all_placements
+from .polycube import get_all_placements, get_all_placements_rect
 from .dlx_solver import DLX
 
 
@@ -103,4 +103,71 @@ def solve(pieces, grid_size=None, find_all=False):
         solutions.append(sol)
 
     print(f"Found {len(solutions)} solution(s).")
+    return solutions
+
+
+def solve_rect(pieces, gx, gy, gz, find_all=False, verbose=True):
+    """Solve polycube packing into a GX x GY x GZ rectangular box.
+
+    Args:
+        pieces: list of pieces, each a list/set of (x, y, z) tuples
+        gx, gy, gz: dimensions of the target box
+        find_all: if True, return all solutions
+        verbose: print progress info
+
+    Returns:
+        list of solutions, each a dict mapping piece_index -> frozenset of cells,
+        or empty list if no solution exists
+    """
+    total_volume = sum(len(p) for p in pieces)
+    expected = gx * gy * gz
+    if total_volume != expected:
+        if verbose:
+            print(f"Total volume {total_volume} != {gx}x{gy}x{gz} = {expected}")
+        return []
+
+    if verbose:
+        print(f"Target: {gx}x{gy}x{gz} box "
+              f"({expected} cells, {len(pieces)} pieces)")
+
+    all_placements = []
+    for i, piece in enumerate(pieces):
+        placements = get_all_placements_rect(piece, gx, gy, gz)
+        if not placements:
+            if verbose:
+                print(f"Piece {i} ({piece}) has no valid placements!")
+            return []
+        all_placements.append((i, placements))
+
+    cell_names = []
+    for x in range(gx):
+        for y in range(gy):
+            for z in range(gz):
+                cell_names.append(f"c_{x}_{y}_{z}")
+
+    piece_names = [f"p_{i}" for i in range(len(pieces))]
+    all_columns = cell_names + piece_names
+    dlx = DLX(all_columns)
+
+    row_id = 0
+    row_map = {}
+    for piece_idx, placements in all_placements:
+        for placement in placements:
+            cols = [f"p_{piece_idx}"]
+            for x, y, z in placement:
+                cols.append(f"c_{x}_{y}_{z}")
+            dlx.add_row(row_id, cols)
+            row_map[row_id] = (piece_idx, placement)
+            row_id += 1
+
+    raw_solutions = dlx.solve(find_all=find_all)
+
+    solutions = []
+    for raw in raw_solutions:
+        sol = {}
+        for rid in raw:
+            pidx, placement = row_map[rid]
+            sol[pidx] = placement
+        solutions.append(sol)
+
     return solutions

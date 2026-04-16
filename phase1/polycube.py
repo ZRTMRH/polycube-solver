@@ -126,3 +126,35 @@ def get_all_placements(piece, grid_size):
                     placements.append(placed)
 
     return placements
+
+
+def get_all_placements_rect(piece, gx, gy, gz):
+    """Get all valid placements of a piece within a GX x GY x GZ box.
+
+    A placement is a frozenset of (x, y, z) coords, all within
+    [0, gx) x [0, gy) x [0, gz).
+
+    Args:
+        piece: iterable of (x, y, z) tuples
+        gx, gy, gz: dimensions of the target rectangular box
+
+    Returns:
+        list of frozensets of (x, y, z) tuples
+    """
+    orientations = get_orientations(piece)
+    placements = []
+
+    for orient in orientations:
+        max_x = max(c[0] for c in orient)
+        max_y = max(c[1] for c in orient)
+        max_z = max(c[2] for c in orient)
+
+        for dx in range(gx - max_x):
+            for dy in range(gy - max_y):
+                for dz in range(gz - max_z):
+                    placed = frozenset(
+                        (x + dx, y + dy, z + dz) for x, y, z in orient
+                    )
+                    placements.append(placed)
+
+    return placements

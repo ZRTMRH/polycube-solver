@@ -49,8 +49,8 @@ CONFIG = {
         'lr': 1e-3,                 # Learning rate (Adam optimizer)
         'batch_size': 64,           # Batch size (reduce to 32 if memory issues)
         'lambda_value': 1.0,        # Weight for value (solvability) loss
-        'lambda_policy': 1.0,       # Weight for policy (placement) loss
-                                    #   Set to 0.0 to train value-only
+        'lambda_policy': 0.0,       # Weight for policy (placement) loss
+                                    #   Current best on harder benchmark: keep value-only default
         'weight_decay': 1e-4,       # L2 regularization
         'grad_clip': 1.0,           # Gradient norm clipping
     },
