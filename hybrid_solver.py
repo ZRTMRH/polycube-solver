@@ -17,7 +17,7 @@ from functools import lru_cache
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from phase1.solver import solve as dlx_solve, cube_root_int
+from phase1.solver import solve as dlx_solve, solve_rect as dlx_solve_rect, cube_root_int
 from phase2.nn_solver import (
     nn_solve,
     dfs_solve_from_frontier,
@@ -536,6 +536,263 @@ def _solve_blockwise_general(
     return None, best_fail
 
 
+def _split_axis(n, min_part=5, max_part=9):
+    """Split axis length n into parts, each in [min_part, max_part].
+
+    Prefers more parts (= smaller sub-problems) for faster DLX.
+    Returns list of part sizes, or None if no valid split exists.
+    """
+    if n < min_part:
+        return None
+    if n <= max_part:
+        return [n]
+    # Try most parts first (smallest sub-problems)
+    for k in range(n // min_part, 1, -1):
+        base = n // k
+        extra = n % k
+        parts = [base + 1] * extra + [base] * (k - extra)
+        if all(min_part <= p <= max_part for p in parts):
+            return parts
+    return None
+
+
+def _allocate_rect_profiles(box_volumes, c3, c4, c5):
+    """Allocate piece count profiles (n3, n4, n5) to rectangular sub-boxes.
+
+    Each sub-box has its own volume, so each gets a profile that exactly fills it.
+    Greedy: assigns profiles closest to the proportional share of remaining pieces.
+
+    Args:
+        box_volumes: list of int volumes for each sub-box
+        c3, c4, c5: total count of size-3, size-4, size-5 pieces
+
+    Returns:
+        list of (n3, n4, n5) tuples, one per sub-box, or None if infeasible
+    """
+    num_boxes = len(box_volumes)
+    out = []
+    rem3, rem4, rem5 = c3, c4, c5
+
+    for i, vol in enumerate(box_volumes):
+        boxes_left = num_boxes - i
+        remaining_vol = sum(box_volumes[i + 1:])
+        profiles = _block_size_profiles(vol)
+
+        t3 = rem3 / boxes_left
+        t4 = rem4 / boxes_left
+        t5 = rem5 / boxes_left
+
+        candidates = []
+        for p3, p4, p5 in profiles:
+            if p3 > rem3 or p4 > rem4 or p5 > rem5:
+                continue
+            r3, r4, r5 = rem3 - p3, rem4 - p4, rem5 - p5
+            # Remaining pieces must exactly fill remaining sub-box volume
+            if 3 * r3 + 4 * r4 + 5 * r5 != remaining_vol:
+                continue
+            score = abs(p3 - t3) + abs(p4 - t4) + abs(p5 - t5)
+            candidates.append((score, (p3, p4, p5)))
+
+        if not candidates:
+            return None
+        candidates.sort(key=lambda x: x[0])
+        p3, p4, p5 = candidates[0][1]
+        out.append((p3, p4, p5))
+        rem3 -= p3
+        rem4 -= p4
+        rem5 -= p5
+
+    if rem3 != 0 or rem4 != 0 or rem5 != 0:
+        return None
+    return out
+
+
+def _solve_rect_blockwise(
+    pieces,
+    grid_size,
+    device='cpu',
+    block_timeout_dlx=15.0,
+    trials=3,
+    retries_per_block=3,
+):
+    """Solve large cubes by decomposing into rectangular sub-boxes.
+
+    Splits each axis into parts >= 5 (e.g., 11 = 5+6), creating
+    rectangular sub-boxes that are each solved independently with DLX.
+    Works for any grid_size >= 10 where each axis can be split into
+    parts of size 5-9.
+
+    Returns:
+        (solution_dict, diagnostics_dict) — solution is None on failure
+    """
+    axis_parts = _split_axis(grid_size)
+    if axis_parts is None or len(axis_parts) < 2:
+        return None, {'reason': 'no_rect_split', 'blocks_total': 0, 'blocks_solved': 0}
+
+    # Build sub-box list: (ox, oy, oz, sx, sy, sz) for each box
+    # ox/oy/oz = origin offset, sx/sy/sz = dimensions
+    x_parts = axis_parts
+    y_parts = _split_axis(grid_size)
+    z_parts = _split_axis(grid_size)
+
+    sub_boxes = []
+    ox = 0
+    for sx in x_parts:
+        oy = 0
+        for sy in y_parts:
+            oz = 0
+            for sz in z_parts:
+                sub_boxes.append((ox, oy, oz, sx, sy, sz))
+                oz += sz
+            oy += sy
+        ox += sx
+
+    num_blocks = len(sub_boxes)
+    box_volumes = [sx * sy * sz for _, _, _, sx, sy, sz in sub_boxes]
+
+    # Verify total volume
+    if sum(box_volumes) != grid_size ** 3:
+        return None, {'reason': 'volume_mismatch', 'blocks_total': num_blocks, 'blocks_solved': 0}
+
+    # Classify pieces by size
+    size_to_indices = {3: [], 4: [], 5: []}
+    for idx, piece in enumerate(pieces):
+        s = len(piece)
+        if s not in size_to_indices:
+            return None, {'reason': f'unsupported_piece_size_{s}',
+                          'blocks_total': num_blocks, 'blocks_solved': 0}
+        size_to_indices[s].append(idx)
+
+    c3, c4, c5 = len(size_to_indices[3]), len(size_to_indices[4]), len(size_to_indices[5])
+    if 3 * c3 + 4 * c4 + 5 * c5 != grid_size ** 3:
+        return None, {'reason': 'piece_volume_mismatch',
+                      'blocks_total': num_blocks, 'blocks_solved': 0}
+
+    # Allocate piece profiles to sub-boxes
+    profiles = _allocate_rect_profiles(box_volumes, c3, c4, c5)
+    if profiles is None:
+        return None, {'reason': 'profile_allocation_failed',
+                      'blocks_total': num_blocks, 'blocks_solved': 0}
+
+    best_fail = {
+        'reason': 'block_unsolved',
+        'blocks_total': num_blocks,
+        'blocks_solved': 0,
+        'failed_block': None,
+        'trial': 0,
+    }
+    base_seed = grid_size * 2017 + len(pieces) * 7919
+
+    for trial in range(max(1, int(trials))):
+        rng = random.Random(base_seed + trial)
+        pools = {
+            3: list(size_to_indices[3]),
+            4: list(size_to_indices[4]),
+            5: list(size_to_indices[5]),
+        }
+        rng.shuffle(pools[3])
+        rng.shuffle(pools[4])
+        rng.shuffle(pools[5])
+
+        global_solution = {}
+        solved_blocks = 0
+        fail_info = None
+
+        for block_id, (ox, oy, oz, sx, sy, sz) in enumerate(sub_boxes):
+            p3, p4, p5 = profiles[block_id]
+            block_solved = False
+
+            for retry in range(max(1, int(retries_per_block))):
+                if len(pools[3]) < p3 or len(pools[4]) < p4 or len(pools[5]) < p5:
+                    fail_info = {
+                        'reason': 'pool_underflow',
+                        'blocks_total': num_blocks,
+                        'blocks_solved': solved_blocks,
+                        'failed_block': (ox, oy, oz, sx, sy, sz),
+                        'trial': trial,
+                    }
+                    break
+
+                if retry == 0:
+                    sel3 = pools[3][:p3]
+                    sel4 = pools[4][:p4]
+                    sel5 = pools[5][:p5]
+                else:
+                    sel3 = rng.sample(pools[3], p3) if p3 > 0 else []
+                    sel4 = rng.sample(pools[4], p4) if p4 > 0 else []
+                    sel5 = rng.sample(pools[5], p5) if p5 > 0 else []
+                idxs = sel3 + sel4 + sel5
+                block_pieces = [pieces[i] for i in idxs]
+
+                # Solve this rectangular sub-box with DLX
+                if sx == sy == sz:
+                    # Cubic sub-box: use standard solver
+                    block_sols = dlx_solve(block_pieces, grid_size=sx, find_all=False)
+                else:
+                    # Rectangular sub-box
+                    block_sols = dlx_solve_rect(
+                        block_pieces, sx, sy, sz, find_all=False, verbose=False
+                    )
+
+                if not block_sols:
+                    continue
+
+                block_sol = block_sols[0]
+                for local_pidx, cells in block_sol.items():
+                    global_idx = idxs[local_pidx]
+                    shifted = frozenset(
+                        (x + ox, y + oy, z + oz) for x, y, z in cells
+                    )
+                    global_solution[global_idx] = shifted
+
+                for i in sel3:
+                    pools[3].remove(i)
+                for i in sel4:
+                    pools[4].remove(i)
+                for i in sel5:
+                    pools[5].remove(i)
+                solved_blocks += 1
+                block_solved = True
+                break
+
+            if fail_info is not None:
+                break
+            if not block_solved:
+                fail_info = {
+                    'reason': 'block_unsolved',
+                    'blocks_total': num_blocks,
+                    'blocks_solved': solved_blocks,
+                    'failed_block': (ox, oy, oz, sx, sy, sz),
+                    'trial': trial,
+                }
+                break
+
+        if fail_info is None:
+            if len(global_solution) != len(pieces):
+                fail_info = {
+                    'reason': 'incomplete_global_solution',
+                    'blocks_total': num_blocks,
+                    'blocks_solved': solved_blocks,
+                    'failed_block': None,
+                    'trial': trial,
+                }
+            else:
+                return global_solution, {
+                    'reason': None,
+                    'blocks_total': num_blocks,
+                    'blocks_solved': solved_blocks,
+                    'axis_parts': axis_parts,
+                    'trial': trial,
+                }
+
+        if fail_info.get('blocks_solved', 0) > best_fail.get('blocks_solved', 0):
+            best_fail = fail_info
+
+    best_fail['reason'] = f"rect_planner_failed:{best_fail.get('reason')}"
+    best_fail['axis_parts'] = axis_parts
+    return None, best_fail
+
+
 def _dlx_worker(pieces, grid_size, out_q):
     """Worker process entrypoint for timeout-safe DLX solving."""
     try:
@@ -552,6 +809,14 @@ def _run_dlx_with_timeout(pieces, grid_size, timeout_seconds):
         (solutions, timed_out, error_message)
     """
     if timeout_seconds is None or timeout_seconds <= 0:
+        try:
+            return dlx_solve(pieces, grid_size=grid_size, find_all=False), False, None
+        except Exception as exc:  # pragma: no cover - defensive path
+            return [], False, repr(exc)
+
+    # For small grids, DLX is fast enough to run directly without a subprocess.
+    # This avoids multiprocessing crashes in Jupyter notebooks and interactive contexts.
+    if grid_size <= 6:
         try:
             return dlx_solve(pieces, grid_size=grid_size, find_all=False), False, None
         except Exception as exc:  # pragma: no cover - defensive path
@@ -597,9 +862,12 @@ def _run_dlx_with_timeout(pieces, grid_size, timeout_seconds):
         except Exception:
             continue
 
-    # No timeout-enforced worker could be started. Refuse in-process DLX here
-    # to avoid unbounded hangs on large instances.
-    return [], True, "DLX timeout worker unavailable in this runtime"
+    # No timeout-enforced worker could be started — run in-process as last resort.
+    # May hang on very large grids, but better than silently failing.
+    try:
+        return dlx_solve(pieces, grid_size=grid_size, find_all=False), False, None
+    except Exception as exc:  # pragma: no cover - defensive path
+        return [], False, repr(exc)
 
 
 def hybrid_solve(pieces, grid_size=None, model_name="soma_3x3x3",
@@ -1378,6 +1646,35 @@ def solve_size_gated(
                         'planner_diag': block_diag,
                     }
                 planner_diag = block_diag
+
+            # Rectangular sub-box decomposition for grids that don't divide
+            # evenly into cubes (e.g., 11 = 5+6, 13 = 6+7).
+            if _split_axis(grid_size) is not None and len(_split_axis(grid_size)) >= 2:
+                adaptive_trials = max(block_planner_trials,
+                                      min(10, len(pieces) // 50))
+                adaptive_retries = max(block_retries_per_block,
+                                       min(8, len(pieces) // 80))
+                rect_solution, rect_diag = _solve_rect_blockwise(
+                    pieces=pieces,
+                    grid_size=grid_size,
+                    device=device,
+                    block_timeout_dlx=block_timeout_dlx,
+                    trials=adaptive_trials,
+                    retries_per_block=adaptive_retries,
+                )
+                if rect_solution is not None:
+                    parts = _split_axis(grid_size)
+                    return {
+                        'solution': rect_solution,
+                        'method': 'planner',
+                        'submethod': f'rect_blockwise_{"x".join(str(p) for p in parts)}',
+                        'controller': 'size_gated',
+                        'tier': 'large_planner',
+                        'time': time.time() - t0,
+                        'planner_diag': rect_diag,
+                    }
+                if planner_diag is None:
+                    planner_diag = rect_diag
 
     if grid_size <= exact_only_max_grid:
         sols, timed_out, err = _run_dlx_with_timeout(pieces, grid_size, timeout_dlx)

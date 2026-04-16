@@ -46,11 +46,10 @@ from grading_harness import (
     Case,
     build_constructive_case,
     build_constructive_suite,
-    build_mixed_constructive_suite,
-    build_striped_constructive_suite,
+    _build_robust_suite,
     _canonical_case_key,
 )
-from phase2.data_generator import enumerate_polycubes, generate_puzzle_instances
+from robust_generator import build_robust_constructive_case
 
 
 FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures"
@@ -135,82 +134,23 @@ def _tag(cases: List[Case], stratum: str, generator: str) -> List[Case]:
     return cases
 
 
-def _solvable_constructive(grid_size: int, n: int, seed: int) -> List[Case]:
-    cases = build_constructive_suite(grid_size, n, seed)
-    return _tag(cases, f"{grid_size}^3_solvable", "constructive")
-
-
-def _solvable_mixed(grid_size: int, n: int, seed: int) -> List[Case]:
-    cases = build_mixed_constructive_suite(grid_size, n, seed)
-    return _tag(cases, f"{grid_size}^3_solvable", "mixed_constructive")
-
-
-def _solvable_striped(grid_size: int, n: int, seed: int) -> List[Case]:
-    cases = build_striped_constructive_suite(grid_size, n, seed)
-    return _tag(cases, f"{grid_size}^3_solvable", "striped_constructive")
-
-
-_POLYCUBE_CATALOG_CACHE = None
-
-
-def _solvable_dlx(grid_size: int, n: int, seed: int) -> List[Case]:
-    """DLX-oracled random solvable cases. Works at small grids (<=5) where
-    build_constructive_case hits topological dead-ends."""
-    global _POLYCUBE_CATALOG_CACHE
-    if _POLYCUBE_CATALOG_CACHE is None:
-        _POLYCUBE_CATALOG_CACHE = enumerate_polycubes(max_size=5)
-
-    from contextlib import redirect_stdout
-    import io as _io
-    buf = _io.StringIO()
-    with redirect_stdout(buf):  # suppress verbose DLX chatter
-        instances = generate_puzzle_instances(
-            num_instances=n,
-            grid_size=grid_size,
-            polycube_catalog=_POLYCUBE_CATALOG_CACHE,
-            min_piece_size=3,
-            max_piece_size=5,
-            dlx_timeout=20.0,
-            seed=seed,
-            verbose=False,
-        )
-
-    cases = [
-        Case(
-            case_id=f"dlx_{grid_size}_{i:02d}",
-            grid_size=grid_size,
-            pieces=inst["pieces"],
-            expected_solvable=True,
-            stratum=f"{grid_size}^3_solvable",
-            generator="dlx_random",
-        )
-        for i, inst in enumerate(instances)
-    ]
-    if len(cases) < n:
-        raise RuntimeError(
-            f"DLX generator only produced {len(cases)}/{n} solvable cases at {grid_size}^3"
-        )
-    return cases
+def _solvable_greedy(grid_size: int, n: int, seed: int) -> List[Case]:
+    """Greedy random decomposition — unbiased 3D pieces."""
+    cases = _build_robust_suite(grid_size, n, seed)
+    return _tag(cases, f"{grid_size}^3_solvable", "greedy_random")
 
 
 # ── The 150-case fixture ────────────────────────────────────────────────────
 
-# Per-grid generator choices are pragmatic:
-# - build_constructive_case: reliable at 3^3, flaky at 4^3, broken at 5^3
-#   (grow-connected-piece hits topological dead ends as N grows).
-# - build_mixed_constructive_case & striped: designed for large grids,
-#   low diversity at N<=5.
-# - DLX-based generate_puzzle_instances: works at 3^3..5^3 (DLX runs in
-#   reasonable time); too slow at 7^3+ to rely on.
-# So: DLX for small grids, mixed/striped/constructive for large grids.
+# All grid sizes use the same unbiased greedy random generator.
+# (grid_size, [(n_solvable, builder), ...], n_unsolvable)
 FIXTURE_SPEC = [
-    (3,  [(10, _solvable_dlx)],                       5),
-    (4,  [(15, _solvable_dlx)],                       5),
-    (5,  [(15, _solvable_dlx)],                       5),
-    (7,  [(15, _solvable_mixed)],                     5),
-    (9,  [(15, _solvable_mixed)],                     5),
-    (12, [(20, _solvable_mixed),
-          (20, _solvable_striped)],                  15),
+    (3,  [(10, _solvable_greedy)],  5),
+    (4,  [(15, _solvable_greedy)],  5),
+    (5,  [(15, _solvable_greedy)],  5),
+    (7,  [(15, _solvable_greedy)],  5),
+    (9,  [(15, _solvable_greedy)],  5),
+    (12, [(40, _solvable_greedy)], 15),
 ]
 
 
