@@ -207,33 +207,52 @@ def _sample_piece_set(available_pieces, target_volume, min_size, max_size, rng):
 
 
 def _solve_with_timeout(pieces, grid_size, timeout):
-    """Solve with DLX, but use a simple time check.
+    """Solve with DLX with a timeout.
 
-    Note: True preemptive timeout would require threading. We use a simpler
-    approach here — we let DLX run and check time after. For truly large
-    instances, consider using signal-based timeout on Unix.
+    Uses SIGALRM when called from the main thread (CLI), falls back to a
+    threading-based timeout otherwise (e.g. Streamlit worker threads).
     """
     import signal
+    import threading
 
-    def _handler(signum, frame):
-        raise TimeoutError("DLX solve timed out")
-
-    # Use SIGALRM on Unix, fallback to no timeout on Windows
+    # Try SIGALRM first — only works on Unix main thread
     use_alarm = hasattr(signal, 'SIGALRM')
     if use_alarm:
-        old_handler = signal.signal(signal.SIGALRM, _handler)
-        signal.alarm(int(timeout))
+        try:
+            def _handler(signum, frame):
+                raise TimeoutError("DLX solve timed out")
+            old_handler = signal.signal(signal.SIGALRM, _handler)
+            signal.alarm(int(timeout))
+            try:
+                solutions = solve(pieces, grid_size=grid_size, find_all=False)
+            except TimeoutError:
+                raise
+            finally:
+                signal.alarm(0)
+                signal.signal(signal.SIGALRM, old_handler)
+            return solutions
+        except ValueError:
+            # signal.signal() raises ValueError when not on main thread
+            pass
 
-    try:
-        solutions = solve(pieces, grid_size=grid_size, find_all=False)
-    except TimeoutError:
-        raise
-    finally:
-        if use_alarm:
-            signal.alarm(0)
-            signal.signal(signal.SIGALRM, old_handler)
+    # Fallback: run DLX in a thread and join with timeout
+    result = [None]
+    error = [None]
 
-    return solutions
+    def _run():
+        try:
+            result[0] = solve(pieces, grid_size=grid_size, find_all=False)
+        except Exception as e:
+            error[0] = e
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    t.join(timeout)
+    if t.is_alive():
+        raise TimeoutError("DLX solve timed out")
+    if error[0] is not None:
+        raise error[0]
+    return result[0]
 
 
 def _canonical_piece_key(piece):
