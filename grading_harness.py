@@ -112,7 +112,7 @@ def build_constructive_suite(grid_size: int, n_cases: int, seed: int) -> List[Ca
 
 def _build_robust_suite(grid_size: int, n_cases: int, seed: int) -> List[Case]:
     """Build n_cases using the unbiased greedy random generator."""
-    from phase1.polycube import normalize
+    from phase1.polycube import normalize, rotate, ROTATIONS
 
     rng = random.Random(seed)
     suite: List[Case] = []
@@ -126,9 +126,9 @@ def _build_robust_suite(grid_size: int, n_cases: int, seed: int) -> List[Case]:
         pieces = _robust_generate(grid_size, local_seed)
         if pieces is None:
             continue
-        # Normalize to origin (solver expects relative pieces)
+        # Normalize to origin and apply a random rotation per piece
         pieces = [
-            list(normalize(frozenset(tuple(c) for c in p)))
+            list(normalize(rotate(p, rng.choice(ROTATIONS))))
             for p in pieces
         ]
         key = _canonical_case_key(grid_size, pieces)

@@ -11,9 +11,15 @@ Strategy:
 import time
 import os
 import sys
+import logging
+import signal
 import multiprocessing as mp
 import random
 from functools import lru_cache
+
+# Per-block logging — activate by setting POLYCUBE_LOG_BLOCKS=1 in the
+# environment and attaching a handler to the "polycube.blocks" logger.
+_block_logger = logging.getLogger("polycube.blocks")
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -194,7 +200,7 @@ def _solve_blockwise_5cube(
     pieces,
     grid_size,
     device='cpu',
-    block_timeout_dlx=8.0,
+    block_timeout_dlx=45.0,
     block_timeout_nn=0.0,
     trials=3,
     retries_per_block=3,
@@ -381,7 +387,7 @@ def _solve_blockwise_general(
     grid_size,
     block_size,
     device='cpu',
-    block_timeout_dlx=8.0,
+    block_timeout_dlx=45.0,
     block_timeout_nn=0.0,
     trials=3,
     retries_per_block=3,
@@ -468,6 +474,7 @@ def _solve_blockwise_general(
                 idxs = sel3 + sel4 + sel5
                 block_pieces = [pieces[i] for i in idxs]
 
+                t_block = time.time()
                 block_res = hybrid_solve(
                     block_pieces,
                     grid_size=block_size,
@@ -478,9 +485,23 @@ def _solve_blockwise_general(
                     device=device,
                     verbose=False,
                 )
+                dt_block = time.time() - t_block
                 block_sol = block_res.get('solution')
                 if block_sol is None:
+                    _block_logger.debug(
+                        "cube block %d/%d (%d,%d,%d) size=%d trial=%d "
+                        "retry=%d FAIL %.1fs",
+                        block_id + 1, num_blocks, bx, by, bz,
+                        block_size, trial, retry, dt_block,
+                    )
                     continue
+
+                _block_logger.debug(
+                    "cube block %d/%d (%d,%d,%d) size=%d trial=%d "
+                    "retry=%d OK %.1fs",
+                    block_id + 1, num_blocks, bx, by, bz,
+                    block_size, trial, retry, dt_block,
+                )
 
                 ox, oy, oz = block_size * bx, block_size * by, block_size * bz
                 for local_pidx, cells in block_sol.items():
@@ -501,6 +522,12 @@ def _solve_blockwise_general(
             if fail_info is not None:
                 break
             if not block_solved:
+                _block_logger.debug(
+                    "cube block %d/%d (%d,%d,%d) size=%d trial=%d "
+                    "EXHAUSTED retries",
+                    block_id + 1, num_blocks, bx, by, bz,
+                    block_size, trial,
+                )
                 fail_info = {
                     'reason': 'block_unsolved',
                     'blocks_total': num_blocks,
@@ -611,7 +638,7 @@ def _solve_rect_blockwise(
     pieces,
     grid_size,
     device='cpu',
-    block_timeout_dlx=15.0,
+    block_timeout_dlx=30.0,
     trials=3,
     retries_per_block=3,
 ):
@@ -724,18 +751,53 @@ def _solve_rect_blockwise(
                 idxs = sel3 + sel4 + sel5
                 block_pieces = [pieces[i] for i in idxs]
 
-                # Solve this rectangular sub-box with DLX
-                if sx == sy == sz:
-                    # Cubic sub-box: use standard solver
-                    block_sols = dlx_solve(block_pieces, grid_size=sx, find_all=False)
-                else:
-                    # Rectangular sub-box
-                    block_sols = dlx_solve_rect(
-                        block_pieces, sx, sy, sz, find_all=False, verbose=False
-                    )
+                # Solve this rectangular sub-box with DLX (with per-block timeout)
+                t_block = time.time()
+                # Scale timeout by sub-box volume relative to 5³=125
+                vol = sx * sy * sz
+                scaled_timeout = max(block_timeout_dlx, block_timeout_dlx * vol / 125.0)
+                int_timeout = max(10, int(scaled_timeout))
+
+                _timed_out = False
+                class _BlockTimeout(Exception):
+                    pass
+                _prev_handler = signal.getsignal(signal.SIGALRM)
+                def _alarm_handler(sig, frame):
+                    raise _BlockTimeout()
+                signal.signal(signal.SIGALRM, _alarm_handler)
+                signal.alarm(int_timeout)
+                try:
+                    if sx == sy == sz:
+                        block_sols = dlx_solve(block_pieces, grid_size=sx, find_all=False, verbose=False)
+                    else:
+                        block_sols = dlx_solve_rect(
+                            block_pieces, sx, sy, sz, find_all=False, verbose=False
+                        )
+                except _BlockTimeout:
+                    block_sols = []
+                    _timed_out = True
+                finally:
+                    signal.alarm(0)
+                    signal.signal(signal.SIGALRM, _prev_handler)
+                dt_block = time.time() - t_block
 
                 if not block_sols:
+                    status = "TIMEOUT" if _timed_out else "FAIL"
+                    _block_logger.debug(
+                        "rect block %d/%d o=(%d,%d,%d) dim=%dx%dx%d "
+                        "trial=%d retry=%d %s %.1fs (limit=%ds)",
+                        block_id + 1, num_blocks, ox, oy, oz,
+                        sx, sy, sz, trial, retry, status, dt_block,
+                        int_timeout,
+                    )
                     continue
+
+                _block_logger.debug(
+                    "rect block %d/%d o=(%d,%d,%d) dim=%dx%dx%d "
+                    "trial=%d retry=%d OK %.1fs",
+                    block_id + 1, num_blocks, ox, oy, oz,
+                    sx, sy, sz, trial, retry, dt_block,
+                )
 
                 block_sol = block_sols[0]
                 for local_pidx, cells in block_sol.items():
@@ -758,6 +820,12 @@ def _solve_rect_blockwise(
             if fail_info is not None:
                 break
             if not block_solved:
+                _block_logger.debug(
+                    "rect block %d/%d o=(%d,%d,%d) dim=%dx%dx%d "
+                    "trial=%d EXHAUSTED retries",
+                    block_id + 1, num_blocks, ox, oy, oz,
+                    sx, sy, sz, trial,
+                )
                 fail_info = {
                     'reason': 'block_unsolved',
                     'blocks_total': num_blocks,
@@ -1549,7 +1617,7 @@ def solve_size_gated(
     large_allow_dlx=False,
     allow_preplaced_fastpath=True,
     block_planner_enabled=True,
-    block_timeout_dlx=8.0,
+    block_timeout_dlx=45.0,
     block_timeout_nn=0.0,
     block_planner_trials=3,
     block_retries_per_block=3,

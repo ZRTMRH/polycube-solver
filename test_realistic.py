@@ -5,9 +5,10 @@ import time, sys, os
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from phase1.polycube import normalize
+from phase1.polycube import normalize, rotate, ROTATIONS
 from hybrid_solver import solve_size_gated
 from robust_generator import build_robust_constructive_case
+import random
 
 
 if __name__ == "__main__":
@@ -31,8 +32,9 @@ if __name__ == "__main__":
                 gen_fails += 1
                 continue
 
+            rng = random.Random(seed)
             pieces = [
-                list(normalize(frozenset(tuple(c) for c in p)))
+                list(normalize(rotate(p, rng.choice(ROTATIONS))))
                 for p in pieces_abs
             ]
 
