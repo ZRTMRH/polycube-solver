@@ -242,7 +242,7 @@ plt.show()
 from hybrid_solver import hybrid_solve
 #increased the timeout_n from 30 to 60 and timeout_dlx from 120 to 200
 result = hybrid_solve(test_pieces, grid_size=GRID_SIZE,
-                      model_name="4x4x4", beam_width=64, timeout_nn=60, timeout_dlx=200)
+                      model_name="4x4x4", beam_width=64, timeout_nn=60, timeout_dlx=400)
 
 print(f"\nResult: solved via '{result['method']}' in {result['time']:.3f}s")
 if result['solution'] is not None:
