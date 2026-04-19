@@ -60,6 +60,8 @@ def train(model, train_loader, val_loader, epochs=50, lr=1e-3,
 
     value_criterion = nn.BCELoss()
     policy_criterion = nn.CrossEntropyLoss(ignore_index=-1)
+    _device_type = device.type if hasattr(device, 'type') else str(device).split(':')[0]
+    scaler = torch.cuda.amp.GradScaler() if _device_type == 'cuda' else None
 
     history = {
         'train_loss': [], 'train_value_loss': [], 'train_policy_loss': [],
@@ -79,7 +81,7 @@ def train(model, train_loader, val_loader, epochs=50, lr=1e-3,
         model.train()
         train_metrics = _run_epoch(
             model, train_loader, value_criterion, policy_criterion,
-            lambda_value, lambda_policy, optimizer, device
+            lambda_value, lambda_policy, optimizer, device, scaler=scaler
         )
 
         # ── Validate ──
@@ -87,7 +89,7 @@ def train(model, train_loader, val_loader, epochs=50, lr=1e-3,
         with torch.no_grad():
             val_metrics = _run_epoch(
                 model, val_loader, value_criterion, policy_criterion,
-                lambda_value, lambda_policy, None, device
+                lambda_value, lambda_policy, None, device, scaler=None
             )
 
         scheduler.step()
@@ -121,16 +123,19 @@ def train(model, train_loader, val_loader, epochs=50, lr=1e-3,
 
 
 def _run_epoch(model, loader, value_criterion, policy_criterion,
-               lambda_value, lambda_policy, optimizer, device):
+               lambda_value, lambda_policy, optimizer, device, scaler=None):
     """Run one epoch of training or validation.
 
     Args:
         optimizer: if None, runs in eval mode (no gradient updates)
+        scaler: GradScaler for AMP, or None
 
     Returns:
         dict with loss, value_loss, policy_loss, value_acc
     """
     is_train = optimizer is not None
+    device_type = device.type if hasattr(device, 'type') else str(device).split(':')[0]
+    use_amp = scaler is not None and device_type == 'cuda'
     total_loss = 0.0
     total_value_loss = 0.0
     total_policy_loss = 0.0
@@ -138,41 +143,49 @@ def _run_epoch(model, loader, value_criterion, policy_criterion,
     total = 0
 
     for batch in loader:
-        states = batch['state'].to(device)
-        labels = batch['label'].to(device)
-        policy_candidates = batch['policy_candidates'].to(device)
-        policy_action_mask = batch['policy_action_mask'].to(device)
-        policy_target_idx = batch['policy_target_idx'].to(device)
+        states = batch['state'].to(device, non_blocking=True)
+        labels = batch['label'].to(device, non_blocking=True)
+        policy_candidates = batch['policy_candidates'].to(device, non_blocking=True)
+        policy_action_mask = batch['policy_action_mask'].to(device, non_blocking=True)
+        policy_target_idx = batch['policy_target_idx'].to(device, non_blocking=True)
 
-        value_pred, policy_pred = model(states)
-        value_pred = value_pred.squeeze(-1)
+        with torch.autocast(device_type=device_type, enabled=use_amp):
+            value_pred, policy_pred = model(states)
+            value_pred = value_pred.squeeze(-1)
 
-        # Value loss: BCE on solvability prediction
-        v_loss = value_criterion(value_pred, labels)
+            # Value loss: BCE on solvability prediction
+            v_loss = value_criterion(value_pred, labels)
 
-        # Policy loss: CE over valid placement actions for each state.
-        # Action logits are derived by projecting cell logits onto placement masks.
-        action_logits = torch.bmm(
-            policy_candidates, policy_pred.unsqueeze(-1)
-        ).squeeze(-1)
-        action_logits = action_logits.masked_fill(~policy_action_mask, -1e9)
+            # Policy loss: CE over valid placement actions for each state.
+            # Action logits are derived by projecting cell logits onto placement masks.
+            action_logits = torch.bmm(
+                policy_candidates, policy_pred.unsqueeze(-1)
+            ).squeeze(-1)
+            action_logits = action_logits.masked_fill(~policy_action_mask, -1e9)
 
-        valid_policy = policy_target_idx >= 0
-        if valid_policy.any():
-            p_loss = policy_criterion(
-                action_logits[valid_policy],
-                policy_target_idx[valid_policy]
-            )
-        else:
-            p_loss = torch.tensor(0.0, device=device)
+            valid_policy = policy_target_idx >= 0
+            if valid_policy.any():
+                p_loss = policy_criterion(
+                    action_logits[valid_policy],
+                    policy_target_idx[valid_policy]
+                )
+            else:
+                p_loss = torch.tensor(0.0, device=device)
 
-        loss = lambda_value * v_loss + lambda_policy * p_loss
+            loss = lambda_value * v_loss + lambda_policy * p_loss
 
         if is_train:
-            optimizer.zero_grad()
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimizer.step()
+            optimizer.zero_grad(set_to_none=True)
+            if use_amp:
+                scaler.scale(loss).backward()
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                optimizer.step()
 
         total_loss += loss.item() * states.size(0)
         total_value_loss += v_loss.item() * states.size(0)
@@ -316,8 +329,13 @@ def run_supervised_training(grid_size=3, max_pieces=10,
     train_dataset = create_torch_dataset(train_ex)
     val_dataset = create_torch_dataset(val_ex)
 
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+    _dt = device.type if hasattr(device, 'type') else str(device).split(':')[0]
+    _pin = _dt == 'cuda'
+    _nw = 4 if _pin else 0
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True,
+                              num_workers=_nw, pin_memory=_pin, persistent_workers=_nw > 0)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False,
+                            num_workers=_nw, pin_memory=_pin, persistent_workers=_nw > 0)
 
     # Step 3: Create model
     print(f"\n[Step 3] Creating model...")
@@ -522,8 +540,13 @@ def run_adi_iteration(model, grid_size=3, max_pieces=10,
     train_dataset = create_torch_dataset(train_ex)
     val_dataset = create_torch_dataset(val_ex)
 
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+    _dt = device.type if hasattr(device, 'type') else str(device).split(':')[0]
+    _pin = _dt == 'cuda'
+    _nw = 4 if _pin else 0
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True,
+                              num_workers=_nw, pin_memory=_pin, persistent_workers=_nw > 0)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False,
+                            num_workers=_nw, pin_memory=_pin, persistent_workers=_nw > 0)
 
     adi_history = train(
         model, train_loader, val_loader,

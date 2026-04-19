@@ -166,9 +166,22 @@ def model_summary(model, grid_size=3, max_pieces=10):
     print(f"  Total parameters: {total:,}")
     print(f"  Trainable parameters: {trainable:,}")
 
+    
     # Test forward pass
-    x = torch.randn(1, model.in_channels, grid_size, grid_size, grid_size)
-    value, policy = model(x)
+
+    """x = torch.randn(1, model.in_channels, grid_size, grid_size, grid_size)
+    print ("not the torch")
+    value, policy = model(x)"""
+    was_training = model.training
+    model.eval()
+    with torch.no_grad():
+            x = torch.randn(1, model.in_channels, grid_size, grid_size, grid_size)
+            print("model(x) is the prob")
+            value, policy = model(x)
+    if was_training:
+
+        model.train()  # restore original mode
+   
     print(f"  Value output shape: {value.shape}")
     print(f"  Policy output shape: {policy.shape}")
     return total, trainable

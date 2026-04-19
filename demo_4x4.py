@@ -1,9 +1,17 @@
 
 import matplotlib.pyplot as plt
+import matplotlib
+matplotlib.use('Agg')  # non-interactive backend, avoids fork conflicts
 import numpy as np
 import time
 import random
 import torch
+
+# Add right after your imports, before Phase 1 code
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"🖥️  Using device: {device}")
+if device.type == 'cuda':
+    print(f"   GPU: {torch.cuda.get_device_name(0)}")
 
 # Phase 1 imports
 from phase1.polycube import get_orientations, get_all_placements
@@ -126,16 +134,28 @@ from torch.utils.data import DataLoader
 model = create_model(grid_size=GRID_SIZE, max_pieces=MAX_PIECES,
                      num_residual_blocks=6, hidden_dim=128)
 model_summary(model, grid_size=GRID_SIZE, max_pieces=MAX_PIECES)
+model = model.to(device)  # ← add this
+if hasattr(torch, 'compile') and device.type == 'cuda':
+    model = torch.compile(model)  # ~30s compile on first batch, then faster
 
+
+print("model_summary OK — about to split dataset")
 train_ex, val_ex = split_dataset(examples)
 print(f"Train: {len(train_ex)}, Val: {len(val_ex)}")
 
 train_dataset = create_torch_dataset(train_ex)
 val_dataset = create_torch_dataset(val_ex)
-train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
-val_loader = DataLoader(val_dataset, batch_size=64, shuffle=False)
+_pin = device.type == 'cuda'
+train_loader = DataLoader(train_dataset, batch_size=256, shuffle=True,
+                          num_workers=4, pin_memory=_pin, persistent_workers=True)
+val_loader = DataLoader(val_dataset, batch_size=256, shuffle=False,
+                        num_workers=4, pin_memory=_pin, persistent_workers=True)
+print("DataLoader OK")
 
-history = train(model, train_loader, val_loader, epochs=50, lr=1e-3)
+
+#history = train(model, train_loader, val_loader, epochs=50, lr=1e-3)
+
+history = train(model, train_loader, val_loader, epochs=50, lr=1e-3, device=device)
 
 save_model(model, "4x4x4", history, metadata={
     'grid_size': GRID_SIZE, 'max_pieces': MAX_PIECES,
@@ -152,7 +172,7 @@ from phase2.nn_solver import nn_solve
 print("NN beam search on 4x4x4 cube...")
 t0 = time.time()
 nn_solution = nn_solve(test_pieces, grid_size=GRID_SIZE, model=model,
-                       max_pieces=MAX_PIECES, beam_width=64, timeout=30.0)
+                       max_pieces=MAX_PIECES, beam_width=64, timeout=30.0, device=device)
 nn_time = time.time() - t0
 
 if nn_solution is not None:
@@ -190,10 +210,10 @@ for step, pidx in enumerate(piece_order):
     remaining_pieces = [test_pieces[i] for i in remaining_indices]
     grid = encode_grid(partial, GRID_SIZE)
     state = encode_state(grid, remaining_pieces, GRID_SIZE, MAX_PIECES)
-    state_tensor = torch.tensor(state, dtype=torch.float32).unsqueeze(0)
+    state_tensor = torch.tensor(state, dtype=torch.float32).unsqueeze(0).to(device)  # ← .to(device)
     with torch.no_grad():
         value, _ = model(state_tensor)
-    confidences.append(value.item())
+    confidences.append(value.item())  # .item() pulls scalar back to CPU — this is fine
     partial[pidx] = dlx_solution[pidx]
 
 confidences.append(1.0)
@@ -237,7 +257,7 @@ def measure_solve_rate(model, n_trials=20, beam_width=8, timeout=15.0):
         inst = random.choice(instances)
         pieces = inst['pieces']
         sol = nn_solve(pieces, GRID_SIZE, model, max_pieces=MAX_PIECES,
-                       beam_width=beam_width, timeout=timeout)
+                       beam_width=beam_width, timeout=timeout, device=device)
         if sol is not None:
             solved += 1
     return solved / n_trials
@@ -249,8 +269,8 @@ print(f"  Solve rate: {pre_rate:.0%}")
 model, adi_history_1, adi_examples_1 = run_adi_iteration(
     model, grid_size=GRID_SIZE, max_pieces=MAX_PIECES,
     num_new_instances=30, beam_width=8,
-    adi_epochs=15, lr=5e-4, batch_size=64,
-    existing_examples=examples,
+    adi_epochs=15, lr=5e-4, batch_size=256,
+    existing_examples=examples, device=device,
 )
 save_model(model, "4x4x4_adi1", adi_history_1)
 fig = plot_training_curves(adi_history_1, title="ADI Round 1 Training Curves")
@@ -259,8 +279,8 @@ plt.show()
 model, adi_history_2, adi_examples_2 = run_adi_iteration(
     model, grid_size=GRID_SIZE, max_pieces=MAX_PIECES,
     num_new_instances=30, beam_width=8,
-    adi_epochs=15, lr=3e-4, batch_size=64,
-    existing_examples=examples,
+    adi_epochs=15, lr=3e-4, batch_size=256,
+    existing_examples=examples, device=device,
 )
 save_model(model, "4x4x4_adi2", adi_history_2)
 
