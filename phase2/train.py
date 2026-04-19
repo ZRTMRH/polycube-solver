@@ -61,7 +61,7 @@ def train(model, train_loader, val_loader, epochs=50, lr=1e-3,
     value_criterion = nn.BCELoss()
     policy_criterion = nn.CrossEntropyLoss(ignore_index=-1)
     _device_type = device.type if hasattr(device, 'type') else str(device).split(':')[0]
-    scaler = torch.cuda.amp.GradScaler() if _device_type == 'cuda' else None
+    scaler = torch.amp.GradScaler('cuda') if _device_type == 'cuda' else None
 
     history = {
         'train_loss': [], 'train_value_loss': [], 'train_policy_loss': [],
@@ -151,10 +151,10 @@ def _run_epoch(model, loader, value_criterion, policy_criterion,
 
         with torch.autocast(device_type=device_type, enabled=use_amp):
             value_pred, policy_pred = model(states)
-            value_pred = value_pred.squeeze(-1)
+            value_pred = value_pred.squeeze(-1).float()  # fp32 required — BCELoss is unsafe with fp16
 
             # Value loss: BCE on solvability prediction
-            v_loss = value_criterion(value_pred, labels)
+            v_loss = value_criterion(value_pred, labels.float())
 
             # Policy loss: CE over valid placement actions for each state.
             # Action logits are derived by projecting cell logits onto placement masks.
