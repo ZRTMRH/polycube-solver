@@ -53,6 +53,9 @@ for size, polys in sorted(catalog.items()):
 print(f"Total: {total} polycubes (sizes 1-5)")
 
 # Generate solvable 4x4x4 instances (pieces drawn from same shapes as Soma)
+import os as _os
+_N_WORKERS = min(4, _os.cpu_count() or 1)
+
 instances = generate_puzzle_instances(
     num_instances=100,
     grid_size=GRID_SIZE,
@@ -60,7 +63,8 @@ instances = generate_puzzle_instances(
     min_piece_size=3,
     max_piece_size=5,
     dlx_timeout=10.0,
-    verbose=True
+    verbose=True,
+    num_workers=_N_WORKERS,
 )
 
 # Use first instance as our test case
@@ -89,7 +93,8 @@ examples = generate_training_data(
     instances,
     max_pieces=MAX_PIECES,
     num_negatives_per_solution=2,
-    verbose=True
+    verbose=True,
+    num_workers=_N_WORKERS,
 )
 
 pos = sum(1 for e in examples if e['label'] == 1.0)
@@ -271,6 +276,7 @@ model, adi_history_1, adi_examples_1 = run_adi_iteration(
     num_new_instances=30, beam_width=8,
     adi_epochs=15, lr=5e-4, batch_size=256,
     existing_examples=examples, device=device,
+    num_search_workers=_N_WORKERS,
 )
 save_model(model, "4x4x4_adi1", adi_history_1)
 fig = plot_training_curves(adi_history_1, title="ADI Round 1 Training Curves")
@@ -281,6 +287,7 @@ model, adi_history_2, adi_examples_2 = run_adi_iteration(
     num_new_instances=30, beam_width=8,
     adi_epochs=15, lr=3e-4, batch_size=256,
     existing_examples=examples, device=device,
+    num_search_workers=_N_WORKERS,
 )
 save_model(model, "4x4x4_adi2", adi_history_2)
 

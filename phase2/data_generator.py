@@ -91,11 +91,28 @@ def _canonical_form(coords):
     return min(forms, key=lambda s: tuple(sorted(s)))
 
 
+def _find_one_instance_worker(args):
+    """Find one solvable puzzle instance. Top-level so multiprocessing can pickle it."""
+    available_pieces, target_volume, min_piece_size, max_piece_size, grid_size, dlx_timeout, seed = args
+    random.seed(seed)
+    for _ in range(300):
+        pieces = _sample_piece_set(available_pieces, target_volume, min_piece_size, max_piece_size)
+        if pieces is None:
+            continue
+        try:
+            solutions = _solve_with_timeout(pieces, grid_size, dlx_timeout)
+        except TimeoutError:
+            continue
+        if solutions:
+            return {'pieces': pieces, 'grid_size': grid_size, 'solution': solutions[0]}
+    return None
+
+
 # ── Puzzle Instance Generation ────────────────────────────────────────────────
 
 def generate_puzzle_instances(num_instances, grid_size, polycube_catalog,
                               min_piece_size=3, max_piece_size=5,
-                              dlx_timeout=10.0, verbose=True):
+                              dlx_timeout=10.0, verbose=True, num_workers=1):
     """Generate solvable puzzle instances by random sampling + DLX verification.
 
     Strategy: randomly sample piece sets whose total volume = grid_size^3,
@@ -128,6 +145,40 @@ def generate_puzzle_instances(num_instances, grid_size, polycube_catalog,
         raise ValueError(f"No polycubes of size {min_piece_size}-{max_piece_size} in catalog")
 
     instances = []
+
+    if num_workers > 1:
+        import os
+        from concurrent.futures import ProcessPoolExecutor
+        num_workers = min(num_workers, os.cpu_count() or 1)
+        n_tasks = max(num_instances * 4, num_workers * 10)
+        base_seed = random.randint(0, 2 ** 20)
+        task_args = [
+            (available_pieces, target_volume, min_piece_size, max_piece_size,
+             grid_size, dlx_timeout, base_seed + i)
+            for i in range(n_tasks)
+        ]
+        chunk = num_workers * 4
+        if verbose:
+            print(f"  Parallel instance generation with {num_workers} workers...")
+        with ProcessPoolExecutor(max_workers=num_workers) as executor:
+            for off in range(0, n_tasks, chunk):
+                if len(instances) >= num_instances:
+                    break
+                for result in executor.map(_find_one_instance_worker,
+                                           task_args[off:off + chunk]):
+                    if result is not None and len(instances) < num_instances:
+                        result['instance_id'] = len(instances)
+                        instances.append(result)
+                        if verbose:
+                            print(f"  Instance {len(instances)}/{num_instances} found")
+                    if len(instances) >= num_instances:
+                        break
+        if len(instances) < num_instances:
+            print(f"Warning: only found {len(instances)}/{num_instances} instances")
+        if verbose:
+            print(f"Generated {len(instances)} instances with {num_workers} workers")
+        return instances[:num_instances]
+
     attempts = 0
     max_total_attempts = num_instances * 500  # prevent infinite loop
 
@@ -366,10 +417,66 @@ def build_policy_candidates(grid, next_piece, target_placement, grid_size):
     return action_masks, target_idx
 
 
+def _process_one_instance_worker(args):
+    """Generate training examples for one instance. Top-level so multiprocessing can pickle it."""
+    inst, inst_idx, max_pieces, num_negatives_per_solution = args
+    pieces = inst['pieces']
+    grid_size = inst['grid_size']
+    solution = inst['solution']
+    instance_id = inst.get('instance_id', inst_idx)
+
+    examples = []
+    piece_order = list(solution.keys())
+    random.shuffle(piece_order)
+
+    for step, piece_idx in enumerate(piece_order):
+        remaining_indices = piece_order[step:]
+        remaining_pieces_list = [pieces[i] for i in remaining_indices]
+        placed_indices = piece_order[:step]
+        placed_solution = {i: solution[i] for i in placed_indices}
+        grid = encode_grid(placed_solution, grid_size)
+
+        next_piece = remaining_pieces_list[0]
+        next_placement = solution[piece_idx]
+        policy_candidates, policy_target_idx = build_policy_candidates(
+            grid, next_piece, next_placement, grid_size
+        )
+        if policy_target_idx < 0:
+            continue
+
+        state_tensor = encode_state(grid, remaining_pieces_list, grid_size, max_pieces)
+        examples.append({
+            'state': state_tensor,
+            'grid': grid,
+            'remaining_pieces': remaining_pieces_list,
+            'label': 1.0,
+            'value': len(remaining_indices),
+            'next_placement': encode_placement(next_placement, grid_size),
+            'next_piece_idx': 0,
+            'policy_candidates': policy_candidates,
+            'policy_target_idx': policy_target_idx,
+            'grid_size': grid_size,
+            'instance_id': instance_id,
+        })
+
+    neg_count = 0
+    neg_attempts = 0
+    max_neg_attempts = num_negatives_per_solution * 20
+    while neg_count < num_negatives_per_solution and neg_attempts < max_neg_attempts:
+        neg_attempts += 1
+        neg_example = _generate_negative_example(pieces, grid_size, max_pieces,
+                                                  instance_id=instance_id)
+        if neg_example is not None:
+            examples.append(neg_example)
+            neg_count += 1
+
+    return examples
+
+
 # ── Training Data Generation ─────────────────────────────────────────────────
 
 def generate_training_data(instances, max_pieces, num_negatives_per_solution=2,
-                           verbose=True):
+                           verbose=True, num_workers=1):
     """Generate training examples from solved puzzle instances.
 
     From each solution, creates:
@@ -387,6 +494,26 @@ def generate_training_data(instances, max_pieces, num_negatives_per_solution=2,
         list of training example dicts
     """
     examples = []
+
+    if num_workers > 1:
+        import os
+        from concurrent.futures import ProcessPoolExecutor
+        num_workers = min(num_workers, os.cpu_count() or 1)
+        task_args = [(inst, i, max_pieces, num_negatives_per_solution)
+                     for i, inst in enumerate(instances)]
+        with ProcessPoolExecutor(max_workers=num_workers) as executor:
+            for inst_idx, inst_examples in enumerate(
+                    executor.map(_process_one_instance_worker, task_args, chunksize=4)):
+                examples.extend(inst_examples)
+                if verbose and (inst_idx + 1) % 10 == 0:
+                    print(f"  Processed {inst_idx + 1}/{len(instances)} instances, "
+                          f"{len(examples)} total examples")
+        if verbose:
+            pos_count = sum(1 for e in examples if e['label'] == 1.0)
+            neg_count = sum(1 for e in examples if e['label'] == 0.0)
+            print(f"Generated {len(examples)} examples "
+                  f"({pos_count} positive, {neg_count} negative)")
+        return examples
 
     for inst_idx, inst in enumerate(instances):
         pieces = inst['pieces']

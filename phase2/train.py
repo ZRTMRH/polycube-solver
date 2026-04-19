@@ -385,7 +385,7 @@ def run_adi_iteration(model, grid_size=3, max_pieces=10,
                       failed_verify_fraction=0.15,
                       failed_verify_max_states=16,
                       existing_examples=None,
-                      device='cpu', verbose=True):
+                      device='cpu', verbose=True, num_search_workers=1):
     """Run one round of Autodidactic Iteration (ADI).
 
     1. Use current model to guide beam search on new puzzle instances
@@ -435,20 +435,33 @@ def run_adi_iteration(model, grid_size=3, max_pieces=10,
     n_failed_skipped = 0
     zero_placement = np.zeros((grid_size, grid_size, grid_size), dtype=np.float32)
 
+    # Prepare piece permutations for all searches
+    search_pieces = []
     for i in range(num_new_instances):
-        # Use SOMA_PIECES but shuffle order each time so beam search
-        # explores different paths (different MRV tie-breaking)
         perm = list(range(len(SOMA_PIECES)))
         _random.shuffle(perm)
-        pieces = [SOMA_PIECES[j] for j in perm]
-        instance_id = f"adi_{i}"
+        search_pieces.append([SOMA_PIECES[j] for j in perm])
 
-        # Run beam search WITH trace collection
-        solution, trace = nn_solve(
-            pieces, grid_size, model, max_pieces=max_pieces,
-            beam_width=beam_width, device=device,
-            return_search_trace=True, timeout=15.0,
-        )
+    # Run beam searches — parallel threads overlap CPU overhead with GPU scoring
+    if num_search_workers > 1:
+        from concurrent.futures import ThreadPoolExecutor
+        model.eval()
+        def _do_search(pieces):
+            return nn_solve(pieces, grid_size, model, max_pieces=max_pieces,
+                            beam_width=beam_width, device=device,
+                            return_search_trace=True, timeout=15.0)
+        with ThreadPoolExecutor(max_workers=num_search_workers) as executor:
+            search_results = list(executor.map(_do_search, search_pieces))
+    else:
+        search_results = [
+            nn_solve(pieces, grid_size, model, max_pieces=max_pieces,
+                     beam_width=beam_width, device=device,
+                     return_search_trace=True, timeout=15.0)
+            for pieces in search_pieces
+        ]
+
+    for i, (solution, trace) in enumerate(search_results):
+        instance_id = f"adi_{i}"
 
         if solution is not None:
             n_solved += 1
