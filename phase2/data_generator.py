@@ -24,6 +24,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from phase1.polycube import normalize, get_orientations, get_all_placements
 from phase1.solver import solve, cube_root_int
 from phase1.dlx_solver import DLX
+from robust_generator import build_robust_constructive_case
 
 
 # ── Polycube Enumeration ──────────────────────────────────────────────────────
@@ -604,6 +605,11 @@ def _build_mixed_constructive_solution(grid_size, seed):
     return _axis_permute(pieces, rng.choice(perms))
 
 
+def _build_robust_constructive_solution(grid_size, seed):
+    """Construct a guaranteed-solvable tiling via the robust surface-peeling generator."""
+    return build_robust_constructive_case(grid_size, seed)
+
+
 def _constructive_instance_from_absolute_pieces(abs_pieces, grid_size, instance_id, source):
     """Convert absolute constructive pieces into training-instance format."""
     pieces = [_normalize_piece_local(piece) for piece in abs_pieces]
@@ -641,34 +647,46 @@ def generate_constructive_puzzle_instances(num_instances, grid_size, seed=42,
         local_seed = rng.randint(0, 10 ** 9)
 
         constructors = []
-        if grid_size >= 7:
-            if large_suite_type == 'striped':
+        if large_suite_type == 'robust':
+            constructors = [
+                ('robust_constructive', _build_robust_constructive_solution),
+            ]
+        elif large_suite_type == 'striped':
+            constructors = [
+                ('striped_constructive', _build_striped_constructive_solution),
+            ]
+        elif large_suite_type == 'connected':
+            constructors = [
+                ('connected_constructive', _build_connected_constructive_solution),
+                ('robust_constructive', _build_robust_constructive_solution),
+            ]
+        elif large_suite_type == 'mixed':
+            if grid_size >= 7:
                 constructors = [
-                    ('striped_constructive', _build_striped_constructive_solution),
-                ]
-            else:
-                constructors = [
+                    ('robust_constructive', _build_robust_constructive_solution),
                     ('mixed_constructive', _build_mixed_constructive_solution),
                     ('striped_constructive', _build_striped_constructive_solution),
                 ]
-        elif grid_size >= 5:
-            if large_suite_type == 'striped':
+            elif grid_size >= 5:
                 constructors = [
+                    ('robust_constructive', _build_robust_constructive_solution),
+                    ('connected_constructive', _build_connected_constructive_solution),
+                    ('connected_constructive', _build_connected_constructive_solution),
+                    ('mixed_constructive', _build_mixed_constructive_solution),
                     ('striped_constructive', _build_striped_constructive_solution),
                 ]
             else:
                 constructors = [
-                    ('connected_constructive', _build_connected_constructive_solution),
+                    ('robust_constructive', _build_robust_constructive_solution),
                     ('connected_constructive', _build_connected_constructive_solution),
                     ('mixed_constructive', _build_mixed_constructive_solution),
                     ('striped_constructive', _build_striped_constructive_solution),
                 ]
         else:
-            constructors = [
-                ('connected_constructive', _build_connected_constructive_solution),
-                ('mixed_constructive', _build_mixed_constructive_solution),
-                ('striped_constructive', _build_striped_constructive_solution),
-            ]
+            raise ValueError(
+                f"Unknown large_suite_type={large_suite_type!r}. "
+                "Use 'mixed', 'striped', 'connected', or 'robust'."
+            )
 
         abs_pieces = None
         source = None

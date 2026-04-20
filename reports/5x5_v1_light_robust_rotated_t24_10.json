@@ -1,0 +1,201 @@
+{
+  "model_name": "5x5x5_calibrated_v1_light",
+  "grid_size": 5,
+  "device": "cpu",
+  "timeout_nn": 24.0,
+  "timeout_dlx": 0.1,
+  "case_source": "robust_generator_rotated",
+  "eval_cases_requested": 10,
+  "cases_generated": 10,
+  "cases_attempted": 10,
+  "valid_solved": 9,
+  "solve_rate": 0.9,
+  "avg_time_sec": 25.926790857315062,
+  "rows": [
+    {
+      "case_id": "robust_rotated_5_0",
+      "seed": 0,
+      "generated": true,
+      "solved": true,
+      "valid": true,
+      "time_sec": 30.629255771636963,
+      "num_pieces": 31,
+      "method": "nn",
+      "submethod": "frontier_complete_harvest",
+      "stages_attempted": [
+        "beam",
+        "contact_capped_5x5",
+        "harvest_5x5",
+        "dfs_frontier_retry",
+        "frontier_complete_retry",
+        "dfs_frontier_harvest",
+        "frontier_complete_harvest"
+      ]
+    },
+    {
+      "case_id": "robust_rotated_5_1",
+      "seed": 1,
+      "generated": true,
+      "solved": false,
+      "valid": false,
+      "time_sec": 38.466593742370605,
+      "num_pieces": 33,
+      "method": null,
+      "submethod": "dlx_timeout",
+      "stages_attempted": [
+        "beam",
+        "contact_capped_5x5",
+        "harvest_5x5",
+        "dfs_frontier_retry",
+        "frontier_complete_retry",
+        "dfs_frontier_harvest",
+        "frontier_complete_harvest",
+        "dfs_frontier_beam",
+        "frontier_complete_beam",
+        "dlx"
+      ]
+    },
+    {
+      "case_id": "robust_rotated_5_2",
+      "seed": 2,
+      "generated": true,
+      "solved": true,
+      "valid": true,
+      "time_sec": 25.33675742149353,
+      "num_pieces": 31,
+      "method": "nn",
+      "submethod": "dfs_frontier_harvest",
+      "stages_attempted": [
+        "beam",
+        "contact_capped_5x5",
+        "harvest_5x5",
+        "dfs_frontier_retry",
+        "frontier_complete_retry",
+        "dfs_frontier_harvest"
+      ]
+    },
+    {
+      "case_id": "robust_rotated_5_3",
+      "seed": 3,
+      "generated": true,
+      "solved": true,
+      "valid": true,
+      "time_sec": 15.374652862548828,
+      "num_pieces": 30,
+      "method": "nn",
+      "submethod": "retry_beam",
+      "stages_attempted": [
+        "beam",
+        "contact_capped_5x5"
+      ]
+    },
+    {
+      "case_id": "robust_rotated_5_4",
+      "seed": 4,
+      "generated": true,
+      "solved": true,
+      "valid": true,
+      "time_sec": 31.648511171340942,
+      "num_pieces": 33,
+      "method": "nn",
+      "submethod": "frontier_complete_harvest",
+      "stages_attempted": [
+        "beam",
+        "contact_capped_5x5",
+        "harvest_5x5",
+        "dfs_frontier_retry",
+        "frontier_complete_retry",
+        "dfs_frontier_harvest",
+        "frontier_complete_harvest"
+      ]
+    },
+    {
+      "case_id": "robust_rotated_5_5",
+      "seed": 5,
+      "generated": true,
+      "solved": true,
+      "valid": true,
+      "time_sec": 33.94607996940613,
+      "num_pieces": 32,
+      "method": "nn",
+      "submethod": "frontier_complete_harvest",
+      "stages_attempted": [
+        "beam",
+        "contact_capped_5x5",
+        "harvest_5x5",
+        "dfs_frontier_retry",
+        "frontier_complete_retry",
+        "dfs_frontier_harvest",
+        "frontier_complete_harvest"
+      ]
+    },
+    {
+      "case_id": "robust_rotated_5_6",
+      "seed": 6,
+      "generated": true,
+      "solved": true,
+      "valid": true,
+      "time_sec": 25.243277072906494,
+      "num_pieces": 30,
+      "method": "nn",
+      "submethod": "dfs_frontier_harvest",
+      "stages_attempted": [
+        "beam",
+        "contact_capped_5x5",
+        "harvest_5x5",
+        "dfs_frontier_retry",
+        "frontier_complete_retry",
+        "dfs_frontier_harvest"
+      ]
+    },
+    {
+      "case_id": "robust_rotated_5_7",
+      "seed": 7,
+      "generated": true,
+      "solved": true,
+      "valid": true,
+      "time_sec": 33.30518078804016,
+      "num_pieces": 33,
+      "method": "nn",
+      "submethod": "frontier_complete_harvest",
+      "stages_attempted": [
+        "beam",
+        "contact_capped_5x5",
+        "harvest_5x5",
+        "dfs_frontier_retry",
+        "frontier_complete_retry",
+        "dfs_frontier_harvest",
+        "frontier_complete_harvest"
+      ]
+    },
+    {
+      "case_id": "robust_rotated_5_8",
+      "seed": 8,
+      "generated": true,
+      "solved": true,
+      "valid": true,
+      "time_sec": 17.61684775352478,
+      "num_pieces": 33,
+      "method": "nn",
+      "submethod": "retry_beam",
+      "stages_attempted": [
+        "beam",
+        "contact_capped_5x5"
+      ]
+    },
+    {
+      "case_id": "robust_rotated_5_9",
+      "seed": 9,
+      "generated": true,
+      "solved": true,
+      "valid": true,
+      "time_sec": 7.700752019882202,
+      "num_pieces": 32,
+      "method": "nn",
+      "submethod": "beam",
+      "stages_attempted": [
+        "beam"
+      ]
+    }
+  ]
+}

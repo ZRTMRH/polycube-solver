@@ -53,6 +53,16 @@ class SearchState:
         )
 
 
+def _recommended_model_max_pieces(grid_size, observed_piece_count):
+    """Choose a practical channel budget for inference on larger grids."""
+    observed_piece_count = int(observed_piece_count)
+    if grid_size <= 5:
+        return max(42, observed_piece_count)
+    if grid_size == 6:
+        return max(64, observed_piece_count)
+    return max(observed_piece_count, int(round((grid_size ** 3) / 4.0)))
+
+
 def _beam_diversity_signature(state, metric='slice_profile'):
     """Coarse structural signature for diversity-preserving beam selection."""
     if metric not in ('slice_profile', 'piece_slice_profile'):
@@ -1298,7 +1308,14 @@ def solve_with_nn(pieces, grid_size=None, model_name="soma_3x3x3",
         if grid_size is None:
             return None
 
-    model, _, metadata = load_model(model_name, device=device)
+    model, _, metadata = load_model(
+        model_name,
+        device=device,
+        grid_size_override=grid_size,
+        max_pieces_override=_recommended_model_max_pieces(
+            grid_size, len(pieces)
+        ),
+    )
     max_pieces = model.in_channels - 1
 
     runtime = resolve_runtime_search_settings(

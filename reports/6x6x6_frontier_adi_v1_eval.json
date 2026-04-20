@@ -1,0 +1,768 @@
+{
+  "model_name": "6x6x6_frontier_adi_v1",
+  "suite_path": "/root/polycube/reports/6x6_benchmark_suite_v2.json",
+  "suite_name": "representative_constructive_6x6",
+  "grid_size": 6,
+  "timeout_nn": 24.0,
+  "timeout_dlx": 0.1,
+  "device": "cuda",
+  "overall": {
+    "cases": 40,
+    "valid_solved": 27,
+    "solve_rate": 0.675,
+    "avg_time_sec": 50.32530871629715,
+    "submethods": {
+      "dfs_frontier": 14,
+      "frontier_complete": 5,
+      "retry_beam": 7,
+      "dlx_timeout": 13,
+      "beam": 1
+    },
+    "families": {
+      "constructive:connected": 31,
+      "robust_rotated": 9
+    }
+  },
+  "bucket_summaries": {
+    "main_connected": {
+      "cases": 20,
+      "valid_solved": 18,
+      "solve_rate": 0.9,
+      "avg_time_sec": 43.61420282125473,
+      "submethods": {
+        "dfs_frontier": 10,
+        "frontier_complete": 2,
+        "retry_beam": 5,
+        "dlx_timeout": 2,
+        "beam": 1
+      },
+      "families": {
+        "constructive:connected": 20
+      }
+    },
+    "legacy_style_hard": {
+      "cases": 10,
+      "valid_solved": 0,
+      "solve_rate": 0.0,
+      "avg_time_sec": 64.27734868526458,
+      "submethods": {
+        "dlx_timeout": 10
+      },
+      "families": {
+        "robust_rotated": 9,
+        "constructive:connected": 1
+      }
+    },
+    "new_hard": {
+      "cases": 10,
+      "valid_solved": 9,
+      "solve_rate": 0.9,
+      "avg_time_sec": 49.79548053741455,
+      "submethods": {
+        "frontier_complete": 3,
+        "dfs_frontier": 4,
+        "dlx_timeout": 1,
+        "retry_beam": 2
+      },
+      "families": {
+        "constructive:connected": 10
+      }
+    }
+  },
+  "rows": [
+    {
+      "case_id": "connected_6_000",
+      "bucket": "main_connected",
+      "generator_family": "constructive:connected",
+      "instance_source": "connected_constructive",
+      "solved": true,
+      "valid": true,
+      "time_sec": 42.98897624015808,
+      "method": "nn",
+      "submethod": "dfs_frontier",
+      "stages_attempted": [
+        "beam",
+        "contact_capped_6x6",
+        "harvest_6x6",
+        "dfs_frontier"
+      ]
+    },
+    {
+      "case_id": "connected_6_001",
+      "bucket": "main_connected",
+      "generator_family": "constructive:connected",
+      "instance_source": "connected_constructive",
+      "solved": true,
+      "valid": true,
+      "time_sec": 45.6733603477478,
+      "method": "nn",
+      "submethod": "dfs_frontier",
+      "stages_attempted": [
+        "beam",
+        "contact_capped_6x6",
+        "harvest_6x6",
+        "dfs_frontier"
+      ]
+    },
+    {
+      "case_id": "connected_6_002",
+      "bucket": "main_connected",
+      "generator_family": "constructive:connected",
+      "instance_source": "connected_constructive",
+      "solved": true,
+      "valid": true,
+      "time_sec": 45.03283214569092,
+      "method": "nn",
+      "submethod": "dfs_frontier",
+      "stages_attempted": [
+        "beam",
+        "contact_capped_6x6",
+        "harvest_6x6",
+        "dfs_frontier"
+      ]
+    },
+    {
+      "case_id": "connected_6_003",
+      "bucket": "main_connected",
+      "generator_family": "constructive:connected",
+      "instance_source": "connected_constructive",
+      "solved": true,
+      "valid": true,
+      "time_sec": 61.2767698764801,
+      "method": "nn",
+      "submethod": "frontier_complete",
+      "stages_attempted": [
+        "beam",
+        "contact_capped_6x6",
+        "harvest_6x6",
+        "dfs_frontier",
+        "frontier_complete"
+      ]
+    },
+    {
+      "case_id": "connected_6_004",
+      "bucket": "main_connected",
+      "generator_family": "constructive:connected",
+      "instance_source": "connected_constructive",
+      "solved": true,
+      "valid": true,
+      "time_sec": 46.02694272994995,
+      "method": "nn",
+      "submethod": "dfs_frontier",
+      "stages_attempted": [
+        "beam",
+        "contact_capped_6x6",
+        "harvest_6x6",
+        "dfs_frontier"
+      ]
+    },
+    {
+      "case_id": "connected_6_005",
+      "bucket": "main_connected",
+      "generator_family": "constructive:connected",
+      "instance_source": "connected_constructive",
+      "solved": true,
+      "valid": true,
+      "time_sec": 32.703102350234985,
+      "method": "nn",
+      "submethod": "retry_beam",
+      "stages_attempted": [
+        "beam",
+        "contact_capped_6x6"
+      ]
+    },
+    {
+      "case_id": "connected_6_006",
+      "bucket": "main_connected",
+      "generator_family": "constructive:connected",
+      "instance_source": "connected_constructive",
+      "solved": true,
+      "valid": true,
+      "time_sec": 43.00923562049866,
+      "method": "nn",
+      "submethod": "dfs_frontier",
+      "stages_attempted": [
+        "beam",
+        "contact_capped_6x6",
+        "harvest_6x6",
+        "dfs_frontier"
+      ]
+    },
+    {
+      "case_id": "connected_6_007",
+      "bucket": "main_connected",
+      "generator_family": "constructive:connected",
+      "instance_source": "connected_constructive",
+      "solved": true,
+      "valid": true,
+      "time_sec": 43.80938482284546,
+      "method": "nn",
+      "submethod": "dfs_frontier",
+      "stages_attempted": [
+        "beam",
+        "contact_capped_6x6",
+        "harvest_6x6",
+        "dfs_frontier"
+      ]
+    },
+    {
+      "case_id": "connected_6_008",
+      "bucket": "main_connected",
+      "generator_family": "constructive:connected",
+      "instance_source": "connected_constructive",
+      "solved": false,
+      "valid": false,
+      "time_sec": 66.51831316947937,
+      "method": null,
+      "submethod": "dlx_timeout",
+      "stages_attempted": [
+        "beam",
+        "contact_capped_6x6",
+        "harvest_6x6",
+        "dfs_frontier",
+        "frontier_complete",
+        "dlx"
+      ]
+    },
+    {
+      "case_id": "connected_6_009",
+      "bucket": "main_connected",
+      "generator_family": "constructive:connected",
+      "instance_source": "connected_constructive",
+      "solved": true,
+      "valid": true,
+      "time_sec": 59.13845252990723,
+      "method": "nn",
+      "submethod": "frontier_complete",
+      "stages_attempted": [
+        "beam",
+        "contact_capped_6x6",
+        "harvest_6x6",
+        "dfs_frontier",
+        "frontier_complete"
+      ]
+    },
+    {
+      "case_id": "connected_6_010",
+      "bucket": "main_connected",
+      "generator_family": "constructive:connected",
+      "instance_source": "connected_constructive",
+      "solved": true,
+      "valid": true,
+      "time_sec": 14.507188320159912,
+      "method": "nn",
+      "submethod": "beam",
+      "stages_attempted": [
+        "beam"
+      ]
+    },
+    {
+      "case_id": "connected_6_011",
+      "bucket": "main_connected",
+      "generator_family": "constructive:connected",
+      "instance_source": "connected_constructive",
+      "solved": true,
+      "valid": true,
+      "time_sec": 44.91265416145325,
+      "method": "nn",
+      "submethod": "dfs_frontier",
+      "stages_attempted": [
+        "beam",
+        "contact_capped_6x6",
+        "harvest_6x6",
+        "dfs_frontier"
+      ]
+    },
+    {
+      "case_id": "connected_6_012",
+      "bucket": "main_connected",
+      "generator_family": "constructive:connected",
+      "instance_source": "connected_constructive",
+      "solved": true,
+      "valid": true,
+      "time_sec": 42.79392957687378,
+      "method": "nn",
+      "submethod": "dfs_frontier",
+      "stages_attempted": [
+        "beam",
+        "contact_capped_6x6",
+        "harvest_6x6",
+        "dfs_frontier"
+      ]
+    },
+    {
+      "case_id": "connected_6_013",
+      "bucket": "main_connected",
+      "generator_family": "constructive:connected",
+      "instance_source": "connected_constructive",
+      "solved": true,
+      "valid": true,
+      "time_sec": 42.00581932067871,
+      "method": "nn",
+      "submethod": "dfs_frontier",
+      "stages_attempted": [
+        "beam",
+        "contact_capped_6x6",
+        "harvest_6x6",
+        "dfs_frontier"
+      ]
+    },
+    {
+      "case_id": "connected_6_014",
+      "bucket": "main_connected",
+      "generator_family": "constructive:connected",
+      "instance_source": "connected_constructive",
+      "solved": true,
+      "valid": true,
+      "time_sec": 31.53904914855957,
+      "method": "nn",
+      "submethod": "retry_beam",
+      "stages_attempted": [
+        "beam",
+        "contact_capped_6x6"
+      ]
+    },
+    {
+      "case_id": "connected_6_015",
+      "bucket": "main_connected",
+      "generator_family": "constructive:connected",
+      "instance_source": "connected_constructive",
+      "solved": true,
+      "valid": true,
+      "time_sec": 30.61937165260315,
+      "method": "nn",
+      "submethod": "retry_beam",
+      "stages_attempted": [
+        "beam",
+        "contact_capped_6x6"
+      ]
+    },
+    {
+      "case_id": "connected_6_016",
+      "bucket": "main_connected",
+      "generator_family": "constructive:connected",
+      "instance_source": "connected_constructive",
+      "solved": true,
+      "valid": true,
+      "time_sec": 34.63545346260071,
+      "method": "nn",
+      "submethod": "retry_beam",
+      "stages_attempted": [
+        "beam",
+        "contact_capped_6x6"
+      ]
+    },
+    {
+      "case_id": "connected_6_017",
+      "bucket": "main_connected",
+      "generator_family": "constructive:connected",
+      "instance_source": "connected_constructive",
+      "solved": true,
+      "valid": true,
+      "time_sec": 50.311243295669556,
+      "method": "nn",
+      "submethod": "dfs_frontier",
+      "stages_attempted": [
+        "beam",
+        "contact_capped_6x6",
+        "harvest_6x6",
+        "dfs_frontier"
+      ]
+    },
+    {
+      "case_id": "connected_6_018",
+      "bucket": "main_connected",
+      "generator_family": "constructive:connected",
+      "instance_source": "connected_constructive",
+      "solved": true,
+      "valid": true,
+      "time_sec": 31.771810293197632,
+      "method": "nn",
+      "submethod": "retry_beam",
+      "stages_attempted": [
+        "beam",
+        "contact_capped_6x6"
+      ]
+    },
+    {
+      "case_id": "connected_6_019",
+      "bucket": "main_connected",
+      "generator_family": "constructive:connected",
+      "instance_source": "connected_constructive",
+      "solved": false,
+      "valid": false,
+      "time_sec": 63.010167360305786,
+      "method": null,
+      "submethod": "dlx_timeout",
+      "stages_attempted": [
+        "beam",
+        "contact_capped_6x6",
+        "harvest_6x6",
+        "dfs_frontier",
+        "frontier_complete",
+        "dlx"
+      ]
+    },
+    {
+      "case_id": "legacy_style_hard_6_000",
+      "bucket": "legacy_style_hard",
+      "generator_family": "robust_rotated",
+      "instance_source": "robust_rotated",
+      "solved": false,
+      "valid": false,
+      "time_sec": 63.974833726882935,
+      "method": null,
+      "submethod": "dlx_timeout",
+      "stages_attempted": [
+        "beam",
+        "contact_capped_6x6",
+        "harvest_6x6",
+        "dfs_frontier",
+        "frontier_complete",
+        "dlx"
+      ]
+    },
+    {
+      "case_id": "legacy_style_hard_6_001",
+      "bucket": "legacy_style_hard",
+      "generator_family": "robust_rotated",
+      "instance_source": "robust_rotated",
+      "solved": false,
+      "valid": false,
+      "time_sec": 65.70032739639282,
+      "method": null,
+      "submethod": "dlx_timeout",
+      "stages_attempted": [
+        "beam",
+        "contact_capped_6x6",
+        "harvest_6x6",
+        "dfs_frontier",
+        "frontier_complete",
+        "dlx"
+      ]
+    },
+    {
+      "case_id": "legacy_style_hard_6_002",
+      "bucket": "legacy_style_hard",
+      "generator_family": "robust_rotated",
+      "instance_source": "robust_rotated",
+      "solved": false,
+      "valid": false,
+      "time_sec": 64.18875193595886,
+      "method": null,
+      "submethod": "dlx_timeout",
+      "stages_attempted": [
+        "beam",
+        "contact_capped_6x6",
+        "harvest_6x6",
+        "dfs_frontier",
+        "frontier_complete",
+        "dlx"
+      ]
+    },
+    {
+      "case_id": "legacy_style_hard_6_003",
+      "bucket": "legacy_style_hard",
+      "generator_family": "robust_rotated",
+      "instance_source": "robust_rotated",
+      "solved": false,
+      "valid": false,
+      "time_sec": 64.45037698745728,
+      "method": null,
+      "submethod": "dlx_timeout",
+      "stages_attempted": [
+        "beam",
+        "contact_capped_6x6",
+        "harvest_6x6",
+        "dfs_frontier",
+        "frontier_complete",
+        "dlx"
+      ]
+    },
+    {
+      "case_id": "legacy_style_hard_6_004",
+      "bucket": "legacy_style_hard",
+      "generator_family": "robust_rotated",
+      "instance_source": "robust_rotated",
+      "solved": false,
+      "valid": false,
+      "time_sec": 63.1065776348114,
+      "method": null,
+      "submethod": "dlx_timeout",
+      "stages_attempted": [
+        "beam",
+        "contact_capped_6x6",
+        "harvest_6x6",
+        "dfs_frontier",
+        "frontier_complete",
+        "dlx"
+      ]
+    },
+    {
+      "case_id": "legacy_style_hard_6_005",
+      "bucket": "legacy_style_hard",
+      "generator_family": "robust_rotated",
+      "instance_source": "robust_rotated",
+      "solved": false,
+      "valid": false,
+      "time_sec": 65.73411226272583,
+      "method": null,
+      "submethod": "dlx_timeout",
+      "stages_attempted": [
+        "beam",
+        "contact_capped_6x6",
+        "harvest_6x6",
+        "dfs_frontier",
+        "frontier_complete",
+        "dlx"
+      ]
+    },
+    {
+      "case_id": "legacy_style_hard_6_006",
+      "bucket": "legacy_style_hard",
+      "generator_family": "constructive:connected",
+      "instance_source": "connected_constructive",
+      "solved": false,
+      "valid": false,
+      "time_sec": 64.63620615005493,
+      "method": null,
+      "submethod": "dlx_timeout",
+      "stages_attempted": [
+        "beam",
+        "contact_capped_6x6",
+        "harvest_6x6",
+        "dfs_frontier",
+        "frontier_complete",
+        "dlx"
+      ]
+    },
+    {
+      "case_id": "legacy_style_hard_6_007",
+      "bucket": "legacy_style_hard",
+      "generator_family": "robust_rotated",
+      "instance_source": "robust_rotated",
+      "solved": false,
+      "valid": false,
+      "time_sec": 64.2708740234375,
+      "method": null,
+      "submethod": "dlx_timeout",
+      "stages_attempted": [
+        "beam",
+        "contact_capped_6x6",
+        "harvest_6x6",
+        "dfs_frontier",
+        "frontier_complete",
+        "dlx"
+      ]
+    },
+    {
+      "case_id": "legacy_style_hard_6_008",
+      "bucket": "legacy_style_hard",
+      "generator_family": "robust_rotated",
+      "instance_source": "robust_rotated",
+      "solved": false,
+      "valid": false,
+      "time_sec": 62.77758502960205,
+      "method": null,
+      "submethod": "dlx_timeout",
+      "stages_attempted": [
+        "beam",
+        "contact_capped_6x6",
+        "harvest_6x6",
+        "dfs_frontier",
+        "frontier_complete",
+        "dlx"
+      ]
+    },
+    {
+      "case_id": "legacy_style_hard_6_009",
+      "bucket": "legacy_style_hard",
+      "generator_family": "robust_rotated",
+      "instance_source": "robust_rotated",
+      "solved": false,
+      "valid": false,
+      "time_sec": 63.933841705322266,
+      "method": null,
+      "submethod": "dlx_timeout",
+      "stages_attempted": [
+        "beam",
+        "contact_capped_6x6",
+        "harvest_6x6",
+        "dfs_frontier",
+        "frontier_complete",
+        "dlx"
+      ]
+    },
+    {
+      "case_id": "new_hard_6_000",
+      "bucket": "new_hard",
+      "generator_family": "constructive:connected",
+      "instance_source": "connected_constructive",
+      "solved": true,
+      "valid": true,
+      "time_sec": 61.211037158966064,
+      "method": "nn",
+      "submethod": "frontier_complete",
+      "stages_attempted": [
+        "beam",
+        "contact_capped_6x6",
+        "harvest_6x6",
+        "dfs_frontier",
+        "frontier_complete"
+      ]
+    },
+    {
+      "case_id": "new_hard_6_001",
+      "bucket": "new_hard",
+      "generator_family": "constructive:connected",
+      "instance_source": "connected_constructive",
+      "solved": true,
+      "valid": true,
+      "time_sec": 59.654874324798584,
+      "method": "nn",
+      "submethod": "frontier_complete",
+      "stages_attempted": [
+        "beam",
+        "contact_capped_6x6",
+        "harvest_6x6",
+        "dfs_frontier",
+        "frontier_complete"
+      ]
+    },
+    {
+      "case_id": "new_hard_6_002",
+      "bucket": "new_hard",
+      "generator_family": "constructive:connected",
+      "instance_source": "connected_constructive",
+      "solved": true,
+      "valid": true,
+      "time_sec": 43.12576413154602,
+      "method": "nn",
+      "submethod": "dfs_frontier",
+      "stages_attempted": [
+        "beam",
+        "contact_capped_6x6",
+        "harvest_6x6",
+        "dfs_frontier"
+      ]
+    },
+    {
+      "case_id": "new_hard_6_003",
+      "bucket": "new_hard",
+      "generator_family": "constructive:connected",
+      "instance_source": "connected_constructive",
+      "solved": true,
+      "valid": true,
+      "time_sec": 41.42874002456665,
+      "method": "nn",
+      "submethod": "dfs_frontier",
+      "stages_attempted": [
+        "beam",
+        "contact_capped_6x6",
+        "harvest_6x6",
+        "dfs_frontier"
+      ]
+    },
+    {
+      "case_id": "new_hard_6_004",
+      "bucket": "new_hard",
+      "generator_family": "constructive:connected",
+      "instance_source": "connected_constructive",
+      "solved": true,
+      "valid": true,
+      "time_sec": 60.65444207191467,
+      "method": "nn",
+      "submethod": "frontier_complete",
+      "stages_attempted": [
+        "beam",
+        "contact_capped_6x6",
+        "harvest_6x6",
+        "dfs_frontier",
+        "frontier_complete"
+      ]
+    },
+    {
+      "case_id": "new_hard_6_005",
+      "bucket": "new_hard",
+      "generator_family": "constructive:connected",
+      "instance_source": "connected_constructive",
+      "solved": false,
+      "valid": false,
+      "time_sec": 61.20914268493652,
+      "method": null,
+      "submethod": "dlx_timeout",
+      "stages_attempted": [
+        "beam",
+        "contact_capped_6x6",
+        "harvest_6x6",
+        "dfs_frontier",
+        "frontier_complete",
+        "dlx"
+      ]
+    },
+    {
+      "case_id": "new_hard_6_006",
+      "bucket": "new_hard",
+      "generator_family": "constructive:connected",
+      "instance_source": "connected_constructive",
+      "solved": true,
+      "valid": true,
+      "time_sec": 49.029364347457886,
+      "method": "nn",
+      "submethod": "dfs_frontier",
+      "stages_attempted": [
+        "beam",
+        "contact_capped_6x6",
+        "harvest_6x6",
+        "dfs_frontier"
+      ]
+    },
+    {
+      "case_id": "new_hard_6_007",
+      "bucket": "new_hard",
+      "generator_family": "constructive:connected",
+      "instance_source": "connected_constructive",
+      "solved": true,
+      "valid": true,
+      "time_sec": 35.4531614780426,
+      "method": "nn",
+      "submethod": "retry_beam",
+      "stages_attempted": [
+        "beam",
+        "contact_capped_6x6"
+      ]
+    },
+    {
+      "case_id": "new_hard_6_008",
+      "bucket": "new_hard",
+      "generator_family": "constructive:connected",
+      "instance_source": "connected_constructive",
+      "solved": true,
+      "valid": true,
+      "time_sec": 54.09938025474548,
+      "method": "nn",
+      "submethod": "dfs_frontier",
+      "stages_attempted": [
+        "beam",
+        "contact_capped_6x6",
+        "harvest_6x6",
+        "dfs_frontier"
+      ]
+    },
+    {
+      "case_id": "new_hard_6_009",
+      "bucket": "new_hard",
+      "generator_family": "constructive:connected",
+      "instance_source": "connected_constructive",
+      "solved": true,
+      "valid": true,
+      "time_sec": 32.08889889717102,
+      "method": "nn",
+      "submethod": "retry_beam",
+      "stages_attempted": [
+        "beam",
+        "contact_capped_6x6"
+      ]
+    }
+  ]
+}

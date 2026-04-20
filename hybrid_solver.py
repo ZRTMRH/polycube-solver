@@ -62,6 +62,16 @@ def _solution_from_preplaced_input(pieces, grid_size):
     return solution
 
 
+def _recommended_model_max_pieces(grid_size, observed_piece_count):
+    """Choose a practical channel budget for inference on larger grids."""
+    observed_piece_count = int(observed_piece_count)
+    if grid_size <= 5:
+        return max(42, observed_piece_count)
+    if grid_size == 6:
+        return max(64, observed_piece_count)
+    return max(observed_piece_count, int(round((grid_size ** 3) / 4.0)))
+
+
 def _frontier_state_key(state_dict):
     occupied = frozenset(tuple(cell) for cell in state_dict.get('occupied', ()))
     remaining = tuple(sorted(int(i) for i in state_dict.get('remaining_indices', ())))
@@ -573,7 +583,7 @@ def _run_dlx_with_timeout(pieces, grid_size, timeout_seconds):
     return [], True, "DLX timeout worker unavailable in this runtime"
 
 
-def hybrid_solve(pieces, grid_size=None, model_name="soma_3x3x3",
+def hybrid_solve(pieces, grid_size=None, model_name="soma_3x3x3", model=None,
                  beam_width=None, timeout_nn=30, timeout_dlx=120,
                  device='cpu', verbose=True,
                  max_candidates_per_state=None,
@@ -622,7 +632,10 @@ def hybrid_solve(pieces, grid_size=None, model_name="soma_3x3x3",
     Args:
         pieces: list of pieces (each a list of (x,y,z) tuples)
         grid_size: side length of target cube (auto-detected if None)
-        model_name: name of saved NN model (None to skip NN)
+        model_name: name of saved NN model (None to skip NN when model is not
+            provided)
+        model: optional in-memory model instance to use instead of loading a
+            checkpoint by name
         beam_width: beam search width for NN solver
         timeout_nn: max seconds for NN solver
         timeout_dlx: max seconds for DLX solver (only on Unix)
@@ -739,13 +752,24 @@ def hybrid_solve(pieces, grid_size=None, model_name="soma_3x3x3",
     nn_time = 0.0
     stages_attempted = []
 
-    if model_name is not None:
+    if model is not None or model_name is not None:
         try:
             if verbose:
                 print(f"\n[1] NN beam search (beam_width={beam_width}, "
                       f"timeout={timeout_nn}s)...")
 
-            model, _, metadata = load_model(model_name, device=device)
+            metadata = None
+            if model is None:
+                model, _, metadata = load_model(
+                    model_name,
+                    device=device,
+                    grid_size_override=grid_size,
+                    max_pieces_override=_recommended_model_max_pieces(
+                        grid_size, len(pieces)
+                    ),
+                )
+            else:
+                model = model.to(device)
             max_pieces = model.in_channels - 1
 
             structural = resolve_structural_fallback_settings(grid_size)
