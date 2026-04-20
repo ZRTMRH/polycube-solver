@@ -120,12 +120,21 @@ class CuboidNet(nn.Module):
     def __init__(self, in_channels, grid_size, num_residual_blocks=6,
                  hidden_dim=128,
                  value_head_type='fc', policy_head_type='fc',
-                 use_context_features=False):
+                 use_context_features=False,
+                 gap_value_channels=64,
+                 gap_value_hidden=128,
+                 policy_conv_inline_logit=False):
         super().__init__()
         if value_head_type not in ('fc', 'gap'):
             raise ValueError(f"value_head_type must be 'fc' or 'gap', got {value_head_type!r}")
         if policy_head_type not in ('fc', 'conv'):
             raise ValueError(f"policy_head_type must be 'fc' or 'conv', got {policy_head_type!r}")
+        if policy_conv_inline_logit and policy_head_type != 'conv':
+            raise ValueError("policy_conv_inline_logit is only valid for policy_head_type='conv'")
+        if policy_conv_inline_logit and use_context_features:
+            raise ValueError(
+                "policy_conv_inline_logit is incompatible with use_context_features=True"
+            )
 
         self.grid_size = grid_size
         self.in_channels = in_channels
@@ -133,6 +142,9 @@ class CuboidNet(nn.Module):
         self.value_head_type = value_head_type
         self.policy_head_type = policy_head_type
         self.use_context_features = use_context_features
+        self.gap_value_channels = gap_value_channels
+        self.gap_value_hidden = gap_value_hidden
+        self.policy_conv_inline_logit = policy_conv_inline_logit
 
         # Stem: project input channels to hidden_dim
         self.stem = nn.Sequential(
@@ -175,14 +187,14 @@ class CuboidNet(nn.Module):
         else:  # 'gap'
             # Scale-invariant: 1x1 reduce, global-average-pool, then small FC.
             self.value_conv = nn.Sequential(
-                nn.Conv3d(hidden_dim, 64, kernel_size=1, bias=False),
-                nn.BatchNorm3d(64),
+                nn.Conv3d(hidden_dim, gap_value_channels, kernel_size=1, bias=False),
+                nn.BatchNorm3d(gap_value_channels),
                 nn.ReLU(),
             )
             self.value_fc = nn.Sequential(
-                nn.Linear(64 + ctx_dim, 128),
+                nn.Linear(gap_value_channels + ctx_dim, gap_value_hidden),
                 nn.ReLU(),
-                nn.Linear(128, 1),
+                nn.Linear(gap_value_hidden, 1),
             )
 
         # ── Policy head ───────────────────────────────────────────────
@@ -201,12 +213,22 @@ class CuboidNet(nn.Module):
         else:  # 'conv'
             # Scale-invariant: 1x1 reduce, optional broadcast-concat of
             # context, then 1x1 conv to per-voxel logits.
-            self.policy_conv = nn.Sequential(
-                nn.Conv3d(hidden_dim, 64, kernel_size=1, bias=False),
-                nn.BatchNorm3d(64),
-                nn.ReLU(),
-            )
-            self.policy_logit = nn.Conv3d(64 + ctx_dim, 1, kernel_size=1)
+            if policy_conv_inline_logit:
+                # Legacy scale-invariant conv head used by early 5x5 checkpoints.
+                self.policy_conv = nn.Sequential(
+                    nn.Conv3d(hidden_dim, 64, kernel_size=1, bias=False),
+                    nn.BatchNorm3d(64),
+                    nn.ReLU(),
+                    nn.Conv3d(64, 1, kernel_size=1),
+                )
+                self.policy_logit = None
+            else:
+                self.policy_conv = nn.Sequential(
+                    nn.Conv3d(hidden_dim, 64, kernel_size=1, bias=False),
+                    nn.BatchNorm3d(64),
+                    nn.ReLU(),
+                )
+                self.policy_logit = nn.Conv3d(64 + ctx_dim, 1, kernel_size=1)
 
     def forward(self, x):
         """Forward pass.
@@ -247,13 +269,16 @@ class CuboidNet(nn.Module):
             p = p.view(p.size(0), -1)
             policy = self.policy_fc(p)
         else:  # 'conv'
-            if ctx_embed is not None:
+            if self.policy_conv_inline_logit:
+                policy = p.view(p.size(0), -1)
+            else:
+                if ctx_embed is not None:
                 # Broadcast the context vector across every voxel and concat.
-                B, _, N1, N2, N3 = p.shape
-                ctx_map = ctx_embed.view(B, -1, 1, 1, 1).expand(B, -1, N1, N2, N3)
-                p = torch.cat([p, ctx_map], dim=1)
-            logit_map = self.policy_logit(p)                  # (B, 1, N, N, N)
-            policy = logit_map.view(logit_map.size(0), -1)    # (B, N^3)
+                    B, _, N1, N2, N3 = p.shape
+                    ctx_map = ctx_embed.view(B, -1, 1, 1, 1).expand(B, -1, N1, N2, N3)
+                    p = torch.cat([p, ctx_map], dim=1)
+                logit_map = self.policy_logit(p)                  # (B, 1, N, N, N)
+                policy = logit_map.view(logit_map.size(0), -1)    # (B, N^3)
 
         return value, policy
 
@@ -273,7 +298,10 @@ class CuboidNet(nn.Module):
 def create_model(grid_size=3, max_pieces=10, num_residual_blocks=6,
                  hidden_dim=128,
                  value_head_type='fc', policy_head_type='fc',
-                 use_context_features=False):
+                 use_context_features=False,
+                 gap_value_channels=64,
+                 gap_value_hidden=128,
+                 policy_conv_inline_logit=False):
     """Factory function to create a CuboidNet model.
 
     Args:
@@ -286,6 +314,9 @@ def create_model(grid_size=3, max_pieces=10, num_residual_blocks=6,
         use_context_features: fuse global occupancy/piece stats into the heads.
             Only affects 'gap'/'conv' heads (ignored by 'fc' heads, but the
             context_proj module is still created so checkpoints remain consistent).
+        gap_value_channels: output width of the gap value reduction conv.
+        gap_value_hidden: hidden width of the gap value MLP.
+        policy_conv_inline_logit: use the legacy inline 1x1 policy conv head.
 
     Returns:
         CuboidNet model
@@ -299,6 +330,9 @@ def create_model(grid_size=3, max_pieces=10, num_residual_blocks=6,
         value_head_type=value_head_type,
         policy_head_type=policy_head_type,
         use_context_features=use_context_features,
+        gap_value_channels=gap_value_channels,
+        gap_value_hidden=gap_value_hidden,
+        policy_conv_inline_logit=policy_conv_inline_logit,
     )
     return model
 

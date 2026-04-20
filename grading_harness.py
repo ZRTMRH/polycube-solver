@@ -13,7 +13,6 @@ from __future__ import annotations
 import random
 import time
 import io
-from functools import lru_cache
 from contextlib import redirect_stdout
 from dataclasses import dataclass
 from typing import Callable, Dict, Iterable, List, Optional, Tuple
@@ -26,9 +25,10 @@ from phase1.test_cases import (
     SOMA_PIECES,
     verify_solution,
 )
-from phase2.data_generator import enumerate_polycubes, generate_puzzle_instances
+from phase2.data_generator import enumerate_polycubes
 from hybrid_solver import hybrid_solve, solve_size_gated
 from phase2.nn_solver import solve_with_nn
+from robust_generator import build_robust_constructive_case as _robust_generate
 
 
 Coord = Tuple[int, int, int]
@@ -79,14 +79,6 @@ def _canonical_case_key(grid_size: int, pieces: List[Piece]) -> Tuple:
     return (grid_size, tuple(parts))
 
 
-def _normalize_piece_local(piece: Piece) -> Piece:
-    min_x = min(c[0] for c in piece)
-    min_y = min(c[1] for c in piece)
-    min_z = min(c[2] for c in piece)
-    normalized = [(x - min_x, y - min_y, z - min_z) for x, y, z in piece]
-    return sorted(normalized)
-
-
 def _sample_piece_sizes(rng: random.Random, total: int = 27) -> Optional[List[int]]:
     """Sample piece sizes in {3,4,5} that sum to total."""
     sizes: List[int] = []
@@ -103,131 +95,49 @@ def _sample_piece_sizes(rng: random.Random, total: int = 27) -> Optional[List[in
     return None
 
 
-def _neighbors_3d(cell: Coord, grid_size: int) -> List[Coord]:
-    x, y, z = cell
-    cand = [
-        (x + 1, y, z), (x - 1, y, z),
-        (x, y + 1, z), (x, y - 1, z),
-        (x, y, z + 1), (x, y, z - 1),
-    ]
-    return [
-        c for c in cand
-        if 0 <= c[0] < grid_size and 0 <= c[1] < grid_size and 0 <= c[2] < grid_size
-    ]
-
-
-def _remaining_volume_feasible(rem: int) -> bool:
-    """Check if rem can be expressed as sum of 3/4/5."""
-    if rem < 0:
-        return False
-    if rem == 0:
-        return True
-    for a in range(rem // 3 + 1):
-        for b in range((rem - 3 * a) // 4 + 1):
-            c = rem - 3 * a - 4 * b
-            if c >= 0 and c % 5 == 0:
-                return True
-    return False
-
-
-def _sample_piece_sizes_345(rng: random.Random, total: int) -> Optional[List[int]]:
-    """Sample sizes in {3,4,5} summing to total with feasibility checks."""
-    remain = total
-    sizes: List[int] = []
-    guard = 0
-    while remain > 0 and guard < total * 3:
-        guard += 1
-        choices = [s for s in (3, 4, 5) if _remaining_volume_feasible(remain - s)]
-        if not choices:
-            return None
-        s = rng.choice(choices)
-        sizes.append(s)
-        remain -= s
-    if remain != 0:
-        return None
-    return sizes
-
-
-def _grow_connected_piece(
-    rng: random.Random, remaining: set, grid_size: int, target_size: int
-) -> Optional[set]:
-    """Grow one connected component of target_size from remaining cells."""
-    if len(remaining) < target_size:
-        return None
-
-    start = rng.choice(tuple(remaining))
-    comp = {start}
-    frontier = {nb for nb in _neighbors_3d(start, grid_size) if nb in remaining}
-
-    while len(comp) < target_size:
-        if not frontier:
-            return None
-        nxt = rng.choice(tuple(frontier))
-        frontier.discard(nxt)
-        if nxt in comp or nxt not in remaining:
-            continue
-        comp.add(nxt)
-        for nb in _neighbors_3d(nxt, grid_size):
-            if nb in remaining and nb not in comp:
-                frontier.add(nb)
-    return comp
-
-
 def build_constructive_case(grid_size: int, seed: int) -> List[Piece]:
-    """Construct one guaranteed-solvable case by partitioning the cube."""
-    rng = random.Random(seed)
-    total = grid_size ** 3
-
-    for restart in range(200):
-        sizes = _sample_piece_sizes_345(rng, total)
-        if not sizes:
-            continue
-
-        remaining = {
-            (x, y, z)
-            for x in range(grid_size)
-            for y in range(grid_size)
-            for z in range(grid_size)
-        }
-        rng.shuffle(sizes)
-        pieces: List[Piece] = []
-
-        ok = True
-        for s in sizes:
-            comp = _grow_connected_piece(rng, remaining, grid_size, s)
-            if comp is None:
-                ok = False
-                break
-            remaining -= comp
-            pieces.append(list(comp))
-
-        if ok and not remaining:
-            return pieces
-
+    """Construct one guaranteed-solvable case via unbiased greedy decomposition."""
+    result = _robust_generate(grid_size, seed)
+    if result is not None:
+        return result
     raise RuntimeError(
-        f"Failed to construct case for grid_size={grid_size} after multiple retries."
+        f"Failed to construct case for grid_size={grid_size} after retries."
     )
 
 
 def build_constructive_suite(grid_size: int, n_cases: int, seed: int) -> List[Case]:
-    """Build guaranteed-solvable benchmark cases for larger tiers."""
+    """Build guaranteed-solvable benchmark cases using greedy decomposition."""
+    return _build_robust_suite(grid_size, n_cases, seed)
+
+
+def _build_robust_suite(grid_size: int, n_cases: int, seed: int) -> List[Case]:
+    """Build n_cases using the unbiased greedy random generator."""
+    from phase1.polycube import normalize, rotate, ROTATIONS
+
     rng = random.Random(seed)
     suite: List[Case] = []
     seen = set()
 
     attempts = 0
-    max_attempts = max(100, n_cases * 40)
+    max_attempts = max(200, n_cases * 50)
     while len(suite) < n_cases and attempts < max_attempts:
         attempts += 1
         local_seed = rng.randint(0, 10**9)
-        pieces = build_constructive_case(grid_size, local_seed)
+        pieces = _robust_generate(grid_size, local_seed)
+        if pieces is None:
+            continue
+        # Normalize to origin and apply a random rotation per piece
+        pieces = [
+            list(normalize(rotate(p, rng.choice(ROTATIONS))))
+            for p in pieces
+        ]
         key = _canonical_case_key(grid_size, pieces)
         if key in seen:
             continue
         seen.add(key)
         suite.append(
             Case(
-                case_id=f"constructive_{grid_size}_{len(suite):02d}",
+                case_id=f"greedy_{grid_size}_{len(suite):02d}",
                 grid_size=grid_size,
                 pieces=pieces,
                 expected_solvable=True,
@@ -236,210 +146,8 @@ def build_constructive_suite(grid_size: int, n_cases: int, seed: int) -> List[Ca
 
     if len(suite) < n_cases:
         raise RuntimeError(
-            f"Could only build {len(suite)}/{n_cases} constructive cases "
+            f"Could only build {len(suite)}/{n_cases} greedy cases "
             f"for grid {grid_size}."
-        )
-    return suite
-
-
-@lru_cache(maxsize=None)
-def _line_size_partitions(length: int) -> Tuple[Tuple[int, ...], ...]:
-    """All ordered partitions of length into segment sizes {3,4,5}."""
-    if length == 0:
-        return ((),)
-    parts: List[Tuple[int, ...]] = []
-    for s in (3, 4, 5):
-        if length - s < 0:
-            continue
-        for tail in _line_size_partitions(length - s):
-            parts.append((s,) + tail)
-    return tuple(parts)
-
-
-def build_striped_constructive_case(
-    grid_size: int, seed: int, relative_pieces: bool = False
-) -> List[Piece]:
-    """Guaranteed-solvable case by partitioning axis lines into 3/4/5 rods."""
-    rng = random.Random(seed)
-    patterns = _line_size_partitions(grid_size)
-    if not patterns:
-        raise RuntimeError(f"No 3/4/5 line partitions exist for grid_size={grid_size}")
-
-    axis = rng.choice(("x", "y", "z"))
-    pieces: List[Piece] = []
-
-    def append_line_segments(fixed_a: int, fixed_b: int, pattern: Tuple[int, ...]) -> None:
-        pos = 0
-        for seg_len in pattern:
-            if axis == "x":
-                piece = [(pos + t, fixed_a, fixed_b) for t in range(seg_len)]
-            elif axis == "y":
-                piece = [(fixed_a, pos + t, fixed_b) for t in range(seg_len)]
-            else:
-                piece = [(fixed_a, fixed_b, pos + t) for t in range(seg_len)]
-            pieces.append(piece)
-            pos += seg_len
-
-    for a in range(grid_size):
-        for b in range(grid_size):
-            pattern = rng.choice(patterns)
-            append_line_segments(a, b, pattern)
-
-    if relative_pieces:
-        return [_normalize_piece_local(piece) for piece in pieces]
-    return pieces
-
-
-def _axis_permute(pieces: List[Piece], perm: Tuple[int, int, int]) -> List[Piece]:
-    out: List[Piece] = []
-    for piece in pieces:
-        out.append([tuple(c[i] for i in perm) for c in piece])  # type: ignore[misc]
-    return out
-
-
-def _emit_two_piece_mixed_segment(pos: int, y0: int, y1: int, z: int, seg_len: int):
-    """Partition a 2xseg_len rectangle into two connected non-rod pieces."""
-    if seg_len == 3:
-        a = [(pos, y0, z), (pos + 1, y0, z), (pos, y1, z)]
-        b = [(pos + 1, y1, z), (pos + 2, y0, z), (pos + 2, y1, z)]
-        return a, b
-    if seg_len == 4:
-        a = [(pos, y0, z), (pos + 1, y0, z), (pos, y1, z), (pos + 1, y1, z)]
-        b = [(pos + 2, y0, z), (pos + 3, y0, z), (pos + 2, y1, z), (pos + 3, y1, z)]
-        return a, b
-    if seg_len == 5:
-        a = [(pos, y0, z), (pos + 1, y0, z), (pos + 2, y0, z), (pos, y1, z), (pos + 1, y1, z)]
-        b = [(pos + 2, y1, z), (pos + 3, y0, z), (pos + 4, y0, z), (pos + 3, y1, z), (pos + 4, y1, z)]
-        return a, b
-    raise ValueError(f"Unsupported segment length: {seg_len}")
-
-
-def build_mixed_constructive_case(
-    grid_size: int, seed: int, relative_pieces: bool = False
-) -> List[Piece]:
-    """Guaranteed-solvable large case with mixed (mostly non-rod) piece shapes."""
-    rng = random.Random(seed)
-    patterns = _line_size_partitions(grid_size)
-    if not patterns:
-        raise RuntimeError(f"No 3/4/5 line partitions exist for grid_size={grid_size}")
-
-    pieces: List[Piece] = []
-
-    # Build in canonical orientation (segments run along x), then permute axes.
-    for z in range(grid_size):
-        # Pair y-lines and partition each 2 x N strip into non-rod pieces.
-        for y in range(0, grid_size - 1, 2):
-            pattern = rng.choice(patterns)
-            pos = 0
-            for seg_len in pattern:
-                a, b = _emit_two_piece_mixed_segment(pos, y, y + 1, z, seg_len)
-                if rng.random() < 0.5:
-                    pieces.append(a)
-                    pieces.append(b)
-                else:
-                    pieces.append(b)
-                    pieces.append(a)
-                pos += seg_len
-
-        # If odd grid size, one leftover y-line remains; fill with rods.
-        if grid_size % 2 == 1:
-            y = grid_size - 1
-            pattern = rng.choice(patterns)
-            pos = 0
-            for seg_len in pattern:
-                rod = [(pos + t, y, z) for t in range(seg_len)]
-                pieces.append(rod)
-                pos += seg_len
-
-    perms = (
-        (0, 1, 2), (0, 2, 1),
-        (1, 0, 2), (1, 2, 0),
-        (2, 0, 1), (2, 1, 0),
-    )
-    perm = rng.choice(perms)
-    pieces = _axis_permute(pieces, perm)
-
-    if relative_pieces:
-        return [_normalize_piece_local(piece) for piece in pieces]
-    return pieces
-
-
-def build_striped_constructive_suite(
-    grid_size: int, n_cases: int, seed: int, relative_pieces: bool = False
-) -> List[Case]:
-    """Build fast guaranteed-solvable suite for larger grids."""
-    rng = random.Random(seed)
-    suite: List[Case] = []
-    seen = set()
-
-    attempts = 0
-    max_attempts = max(50, n_cases * 20)
-    while len(suite) < n_cases and attempts < max_attempts:
-        attempts += 1
-        local_seed = rng.randint(0, 10**9)
-        pieces = build_striped_constructive_case(
-            grid_size, local_seed, relative_pieces=relative_pieces
-        )
-        key = _canonical_case_key(grid_size, pieces)
-        if key in seen:
-            continue
-        seen.add(key)
-        suite.append(
-            Case(
-                case_id=(
-                    f"striped_rel_{grid_size}_{len(suite):02d}"
-                    if relative_pieces else
-                    f"striped_{grid_size}_{len(suite):02d}"
-                ),
-                grid_size=grid_size,
-                pieces=pieces,
-                expected_solvable=True,
-            )
-        )
-
-    if len(suite) < n_cases:
-        raise RuntimeError(
-            f"Could only build {len(suite)}/{n_cases} striped cases for grid {grid_size}."
-        )
-    return suite
-
-
-def build_mixed_constructive_suite(
-    grid_size: int, n_cases: int, seed: int, relative_pieces: bool = False
-) -> List[Case]:
-    """Build fast guaranteed-solvable mixed-shape suite for larger grids."""
-    rng = random.Random(seed)
-    suite: List[Case] = []
-    seen = set()
-
-    attempts = 0
-    max_attempts = max(50, n_cases * 20)
-    while len(suite) < n_cases and attempts < max_attempts:
-        attempts += 1
-        local_seed = rng.randint(0, 10**9)
-        pieces = build_mixed_constructive_case(
-            grid_size, local_seed, relative_pieces=relative_pieces
-        )
-        key = _canonical_case_key(grid_size, pieces)
-        if key in seen:
-            continue
-        seen.add(key)
-        suite.append(
-            Case(
-                case_id=(
-                    f"mixed_rel_{grid_size}_{len(suite):02d}"
-                    if relative_pieces else
-                    f"mixed_{grid_size}_{len(suite):02d}"
-                ),
-                grid_size=grid_size,
-                pieces=pieces,
-                expected_solvable=True,
-            )
-        )
-
-    if len(suite) < n_cases:
-        raise RuntimeError(
-            f"Could only build {len(suite)}/{n_cases} mixed cases for grid {grid_size}."
         )
     return suite
 
@@ -451,62 +159,9 @@ def build_scale_suite(
     dlx_timeout: float = 20.0,
     large_suite_type: str = "mixed",
 ) -> Tuple[List[Case], str]:
-    """Build large-scale benchmark suite with robust constructive fallbacks."""
-    # Large grids should avoid DLX-based suite generation entirely.
-    if grid_size >= 7:
-        if large_suite_type == "striped":
-            suite = build_striped_constructive_suite(
-                grid_size=grid_size, n_cases=n_cases, seed=seed, relative_pieces=True
-            )
-            return suite, "striped_constructive_relative"
-        suite = build_mixed_constructive_suite(
-            grid_size=grid_size, n_cases=n_cases, seed=seed, relative_pieces=True
-        )
-        return suite, "mixed_constructive_relative"
-
-    try:
-        suite = build_constructive_suite(grid_size=grid_size, n_cases=n_cases, seed=seed)
-        return suite, "constructive"
-    except RuntimeError:
-        try:
-            suite = build_mixed_constructive_suite(
-                grid_size=grid_size, n_cases=n_cases, seed=seed + 137, relative_pieces=True
-            )
-            return suite, "mixed_constructive_relative_fallback"
-        except RuntimeError:
-            try:
-                suite = build_striped_constructive_suite(
-                    grid_size=grid_size, n_cases=n_cases, seed=seed + 271, relative_pieces=True
-                )
-                return suite, "striped_constructive_relative_fallback"
-            except RuntimeError:
-            # Last resort: DLX-verified instance generation from phase2 pipeline.
-                catalog = enumerate_polycubes(max_size=5)
-                instances = generate_puzzle_instances(
-                    num_instances=n_cases,
-                    grid_size=grid_size,
-                    polycube_catalog=catalog,
-                    min_piece_size=3,
-                    max_piece_size=5,
-                    dlx_timeout=dlx_timeout,
-                    seed=seed + 389,
-                    verbose=False,
-                )
-                suite = []
-                for i, inst in enumerate(instances):
-                    suite.append(
-                        Case(
-                            case_id=f"dlxgen_{grid_size}_{i:02d}",
-                            grid_size=grid_size,
-                            pieces=[list(p) for p in inst["pieces"]],
-                            expected_solvable=True,
-                        )
-                    )
-                if len(suite) < n_cases:
-                    raise RuntimeError(
-                        f"Could only build {len(suite)}/{n_cases} fallback cases for grid {grid_size}."
-                    )
-                return suite, "dlx_fallback"
+    """Build benchmark suite using unbiased greedy decomposition at all sizes."""
+    suite = _build_robust_suite(grid_size, n_cases, seed)
+    return suite, "greedy_random"
 
 
 def _oracle_is_solvable(pieces: List[Piece], grid_size: int) -> bool:

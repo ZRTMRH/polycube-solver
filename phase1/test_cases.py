@@ -164,29 +164,79 @@ def test_soma_cube_all():
     return solutions
 
 
-def verify_solution(solution, grid_size):
-    """Verify that a solution correctly fills an NxNxN cube."""
+def verify_solution(solution, grid_size, pieces=None):
+    """Verify that a solution correctly fills an NxNxN cube.
+
+    Checks:
+      1. No overlapping cells between pieces
+      2. All cells in [0, grid_size)^3 are covered (no gaps)
+      3. Every piece index in [0, len(pieces)) appears exactly once
+      4. If `pieces` is provided, each placed shape matches the input
+         piece up to rotation and translation
+
+    Args:
+        solution: dict mapping piece_idx -> frozenset/set of (x,y,z) cells
+        grid_size: side length of target cube
+        pieces: optional list of input pieces (each a list of (x,y,z) tuples).
+            When provided, enables shape-match verification.
+
+    Returns:
+        True if the solution is valid
+    """
+    from .polycube import normalize, get_orientations
+
     expected_cells = set()
     for x in range(grid_size):
         for y in range(grid_size):
             for z in range(grid_size):
                 expected_cells.add((x, y, z))
 
+    # Check piece index completeness: every index 0..n-1 must appear exactly once
+    if pieces is not None:
+        expected_indices = set(range(len(pieces)))
+        actual_indices = set(solution.keys())
+        if actual_indices != expected_indices:
+            missing = expected_indices - actual_indices
+            extra = actual_indices - expected_indices
+            print(f"  ERROR: Piece index mismatch — missing: {missing}, extra: {extra}")
+            return False
+
     actual_cells = set()
     for piece_idx, cells in solution.items():
-        overlap = actual_cells & cells
+        cells_set = frozenset(cells) if not isinstance(cells, frozenset) else cells
+
+        # Check overlap
+        overlap = actual_cells & cells_set
         if overlap:
             print(f"  ERROR: Piece {piece_idx} overlaps at {overlap}")
             return False
-        actual_cells |= cells
+        actual_cells |= cells_set
 
+        # Check bounds
+        for x, y, z in cells_set:
+            if not (0 <= x < grid_size and 0 <= y < grid_size and 0 <= z < grid_size):
+                print(f"  ERROR: Piece {piece_idx} cell ({x},{y},{z}) out of bounds")
+                return False
+
+        # Check shape matches input piece (up to rotation + translation)
+        if pieces is not None:
+            if piece_idx < 0 or piece_idx >= len(pieces):
+                print(f"  ERROR: Piece index {piece_idx} out of range [0, {len(pieces)})")
+                return False
+            placed_norm = normalize(cells_set)
+            valid_orientations = set(get_orientations(pieces[piece_idx]))
+            if placed_norm not in valid_orientations:
+                print(f"  ERROR: Piece {piece_idx} placement doesn't match any rotation of input shape")
+                return False
+
+    # Check full coverage
     if actual_cells != expected_cells:
         missing = expected_cells - actual_cells
         extra = actual_cells - expected_cells
         if missing:
-            print(f"  ERROR: Missing cells: {missing}")
+            print(f"  ERROR: Missing {len(missing)} cells")
         if extra:
-            print(f"  ERROR: Extra cells outside grid: {extra}")
+            print(f"  ERROR: {len(extra)} extra cells outside grid")
         return False
 
     return True

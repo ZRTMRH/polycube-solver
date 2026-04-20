@@ -217,6 +217,9 @@ def save_model(model, name, history=None, metadata=None):
         'value_head_type': getattr(model, 'value_head_type', 'fc'),
         'policy_head_type': getattr(model, 'policy_head_type', 'fc'),
         'use_context_features': getattr(model, 'use_context_features', False),
+        'gap_value_channels': getattr(model, 'gap_value_channels', 64),
+        'gap_value_hidden': getattr(model, 'gap_value_hidden', 128),
+        'policy_conv_inline_logit': getattr(model, 'policy_conv_inline_logit', False),
     }
     if history is not None:
         checkpoint['history'] = history
@@ -229,33 +232,159 @@ def save_model(model, name, history=None, metadata=None):
     return path
 
 
-def load_model(name, device='cpu'):
+def _checkpoint_model_kwargs(checkpoint, state_dict):
+    """Infer model-construction kwargs from a checkpoint and its weights."""
+    gap_value_channels = checkpoint.get('gap_value_channels', 64)
+    gap_value_hidden = checkpoint.get('gap_value_hidden', 128)
+    policy_conv_inline_logit = checkpoint.get('policy_conv_inline_logit', False)
+
+    # Backward-compatibility: early 5x5 gap/conv checkpoints used a smaller
+    # gap value head and stored the policy logit conv inside policy_conv.
+    if checkpoint.get('value_head_type', 'fc') == 'gap':
+        gap_value_channels = state_dict['value_conv.0.weight'].shape[0]
+        gap_value_hidden = state_dict['value_fc.0.weight'].shape[0]
+    if (
+        checkpoint.get('policy_head_type', 'fc') == 'conv'
+        and 'policy_logit.weight' not in state_dict
+        and 'policy_conv.3.weight' in state_dict
+    ):
+        policy_conv_inline_logit = True
+
+    return {
+        'grid_size': checkpoint['grid_size'],
+        'max_pieces': checkpoint['in_channels'] - 1,
+        'num_residual_blocks': checkpoint['num_residual_blocks'],
+        'hidden_dim': checkpoint['hidden_dim'],
+        'value_head_type': checkpoint.get('value_head_type', 'fc'),
+        'policy_head_type': checkpoint.get('policy_head_type', 'fc'),
+        'use_context_features': checkpoint.get('use_context_features', False),
+        'gap_value_channels': gap_value_channels,
+        'gap_value_hidden': gap_value_hidden,
+        'policy_conv_inline_logit': policy_conv_inline_logit,
+    }
+
+
+def _transfer_state_dict(model, source_state_dict):
+    """Load compatible checkpoint weights into a resized model.
+
+    This is intended for scale-friendly gap/conv checkpoints whose stem input
+    channels may grow when we increase max_pieces for larger cubes.
+    """
+    target_state = model.state_dict()
+    merged_state = {}
+    loaded_keys = []
+    skipped_keys = []
+
+    for key, target_tensor in target_state.items():
+        source_tensor = source_state_dict.get(key)
+        if source_tensor is None:
+            skipped_keys.append(key)
+            continue
+
+        if source_tensor.shape == target_tensor.shape:
+            merged_state[key] = source_tensor
+            loaded_keys.append(key)
+            continue
+
+        if (
+            key == 'stem.0.weight'
+            and source_tensor.ndim == 5
+            and target_tensor.ndim == 5
+            and source_tensor.shape[0] == target_tensor.shape[0]
+            and source_tensor.shape[2:] == target_tensor.shape[2:]
+            and source_tensor.shape[1] <= target_tensor.shape[1]
+        ):
+            adapted = target_tensor.clone()
+            adapted[:, :source_tensor.shape[1], :, :, :] = source_tensor
+
+            # Initialize any extra piece channels from the mean of the learned
+            # source piece-channel filters instead of random noise.
+            if target_tensor.shape[1] > source_tensor.shape[1] and source_tensor.shape[1] > 1:
+                extra = target_tensor.shape[1] - source_tensor.shape[1]
+                piece_mean = source_tensor[:, 1:, :, :, :].mean(dim=1, keepdim=True)
+                adapted[:, source_tensor.shape[1]:, :, :, :] = piece_mean.expand(
+                    -1, extra, -1, -1, -1
+                )
+            merged_state[key] = adapted
+            loaded_keys.append(key)
+            continue
+
+        skipped_keys.append(key)
+
+    model.load_state_dict(merged_state, strict=False)
+    return {
+        'loaded_keys': loaded_keys,
+        'skipped_keys': skipped_keys,
+    }
+
+
+def load_model(name, device='cpu', grid_size_override=None, max_pieces_override=None):
     """Load a model checkpoint.
 
     Args:
         name: filename (without extension)
         device: target device
+        grid_size_override: optional target grid size for scale-transfer.
+        max_pieces_override: optional target max piece-channel count.
 
     Returns:
         (model, history, metadata)
     """
     path = TRAINED_MODELS_DIR / f"{name}.pt"
     checkpoint = torch.load(path, map_location=device, weights_only=False)
+    state_dict = checkpoint['model_state_dict']
+    model_kwargs = _checkpoint_model_kwargs(checkpoint, state_dict)
+    source_grid_size = model_kwargs['grid_size']
+    source_max_pieces = model_kwargs['max_pieces']
+    target_grid_size = (
+        source_grid_size if grid_size_override is None else int(grid_size_override)
+    )
+    target_max_pieces = (
+        source_max_pieces if max_pieces_override is None else int(max_pieces_override)
+    )
+
+    transferring = (
+        target_grid_size != source_grid_size or target_max_pieces != source_max_pieces
+    )
+    if transferring and (
+        model_kwargs['value_head_type'] == 'fc' or model_kwargs['policy_head_type'] == 'fc'
+    ):
+        raise ValueError(
+            f"Checkpoint '{name}' uses grid-bound fc heads and cannot be resized "
+            f"from grid={source_grid_size}, max_pieces={source_max_pieces} "
+            f"to grid={target_grid_size}, max_pieces={target_max_pieces}."
+        )
 
     model = create_model(
-        grid_size=checkpoint['grid_size'],
-        max_pieces=checkpoint['in_channels'] - 1,
-        num_residual_blocks=checkpoint['num_residual_blocks'],
-        hidden_dim=checkpoint['hidden_dim'],
-        value_head_type=checkpoint.get('value_head_type', 'fc'),
-        policy_head_type=checkpoint.get('policy_head_type', 'fc'),
-        use_context_features=checkpoint.get('use_context_features', False),
+        grid_size=target_grid_size,
+        max_pieces=target_max_pieces,
+        num_residual_blocks=model_kwargs['num_residual_blocks'],
+        hidden_dim=model_kwargs['hidden_dim'],
+        value_head_type=model_kwargs['value_head_type'],
+        policy_head_type=model_kwargs['policy_head_type'],
+        use_context_features=model_kwargs['use_context_features'],
+        gap_value_channels=model_kwargs['gap_value_channels'],
+        gap_value_hidden=model_kwargs['gap_value_hidden'],
+        policy_conv_inline_logit=model_kwargs['policy_conv_inline_logit'],
     )
-    model.load_state_dict(checkpoint['model_state_dict'])
+    transfer_info = None
+    if transferring:
+        transfer_info = _transfer_state_dict(model, state_dict)
+    else:
+        model.load_state_dict(state_dict)
     model = model.to(device)
 
     history = checkpoint.get('history', None)
     metadata = checkpoint.get('metadata', None)
+    if transferring:
+        metadata = dict(metadata or {})
+        metadata['transfer_from_model'] = name
+        metadata['source_grid_size'] = source_grid_size
+        metadata['source_max_pieces'] = source_max_pieces
+        metadata['grid_size'] = target_grid_size
+        metadata['max_pieces'] = target_max_pieces
+        metadata['transfer_loaded_keys'] = len(transfer_info['loaded_keys'])
+        metadata['transfer_skipped_keys'] = len(transfer_info['skipped_keys'])
 
     return model, history, metadata
 
@@ -301,7 +430,8 @@ def run_supervised_training(grid_size=3, max_pieces=10,
         max_piece_size: maximum polycube size for non-3x3 data generation
         dlx_timeout: per-instance DLX timeout during non-3x3 data generation
         instance_source: 'auto', 'constructive', or 'dlx' for non-3x3 grids
-        constructive_variant: constructive generator family ('mixed' or 'striped')
+        constructive_variant: constructive generator family
+            ('mixed', 'striped', 'connected', or 'robust')
         instance_seed: seed used for non-3x3 instance generation
         device: 'cpu' or 'cuda'
         save_name: name for saved model (None to skip saving)
@@ -462,7 +592,8 @@ def run_adi_iteration(model, grid_size=3, max_pieces=10,
         max_piece_size: max piece size for non-3x3 ADI instance generation
         dlx_timeout: timeout for generating solvable ADI instances (non-3x3)
         instance_source: 'auto', 'constructive', or 'dlx' for non-3x3 ADI
-        constructive_variant: constructive generator family ('mixed' or 'striped')
+        constructive_variant: constructive generator family
+            ('mixed', 'striped', 'connected', or 'robust')
         instance_seed: seed used for internal non-3x3 ADI instance generation
         adi_instances: optional prebuilt list of puzzle instances; each entry
             should contain a 'pieces' field. If provided, overrides internal
@@ -703,6 +834,9 @@ def run_frontier_adi_iteration(
     instance_seed=42,
     adi_instances=None,
     existing_examples=None,
+    eval_callback=None,
+    eval_every_epochs=0,
+    early_stop_patience=0,
     device='cpu',
     verbose=True,
 ):
@@ -911,12 +1045,81 @@ def run_frontier_adi_iteration(
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
 
-    adi_history = train(
-        model, train_loader, val_loader,
-        epochs=adi_epochs, lr=lr,
-        lambda_value=lambda_value, lambda_policy=lambda_policy,
-        device=device, verbose=verbose,
-    )
+    adi_history = {}
+    proxy_eval_history = []
+    best_proxy_score = None
+    best_proxy_state = None
+    no_improve = 0
+    epochs_completed = 0
+    chunk_size = int(eval_every_epochs) if eval_callback and eval_every_epochs else int(adi_epochs)
+    chunk_size = max(1, chunk_size)
+
+    def _extend_history(dst, src):
+        for key, values in src.items():
+            dst.setdefault(key, [])
+            dst[key].extend(values)
+
+    while epochs_completed < int(adi_epochs):
+        this_chunk = min(chunk_size, int(adi_epochs) - epochs_completed)
+        chunk_history = train(
+            model, train_loader, val_loader,
+            epochs=this_chunk, lr=lr,
+            lambda_value=lambda_value, lambda_policy=lambda_policy,
+            device=device, verbose=verbose,
+        )
+        _extend_history(adi_history, chunk_history)
+        epochs_completed += this_chunk
+
+        if eval_callback is None:
+            continue
+
+        proxy_summary = eval_callback(model=model, epochs_trained=epochs_completed)
+        if proxy_summary is None:
+            continue
+        proxy_summary = dict(proxy_summary)
+        proxy_summary['epochs_trained'] = epochs_completed
+        proxy_eval_history.append(proxy_summary)
+
+        proxy_score = proxy_summary.get('score')
+        if proxy_score is None:
+            continue
+
+        improved = best_proxy_score is None or proxy_score > best_proxy_score
+        if improved:
+            best_proxy_score = proxy_score
+            best_proxy_state = {
+                k: v.detach().cpu().clone()
+                for k, v in model.state_dict().items()
+            }
+            no_improve = 0
+        else:
+            no_improve += 1
+
+        if verbose:
+            worst_bucket = proxy_summary.get('worst_bucket_solve_rate')
+            print(
+                f"  Proxy eval @ epoch {epochs_completed}: "
+                f"score={proxy_score:.4f} "
+                f"worst_bucket={worst_bucket if worst_bucket is not None else 'n/a'}"
+            )
+
+        if early_stop_patience and no_improve >= int(early_stop_patience):
+            if verbose:
+                print(
+                    f"  Early stopping after {epochs_completed} epochs "
+                    f"(proxy plateau: patience={early_stop_patience})"
+                )
+            break
+
+    if best_proxy_state is not None:
+        model.load_state_dict(best_proxy_state)
+        model = model.to(device)
+
+    if proxy_eval_history:
+        adi_history['proxy_eval'] = proxy_eval_history
+    adi_history['_epochs_completed'] = epochs_completed
+    if best_proxy_score is not None:
+        adi_history['_best_proxy_score'] = best_proxy_score
 
     return model, adi_history, new_examples
 
