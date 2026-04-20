@@ -21,8 +21,6 @@ sys.path.insert(0, str(ROOT))
 
 MODEL = "4x4x4_modal"
 BEAM_WIDTH = 32
-TIMEOUT_NN = 10.0
-TIMEOUT_DLX = 30.0
 
 app = modal.App("polycube-eval")
 volume = modal.Volume.from_name("polycube-artifacts", create_if_missing=True)
@@ -90,15 +88,14 @@ def _score_and_print(results):
 
 # ── Modal remote function ─────────────────────────────────────────────────────
 
-@app.function(image=image, cpu=2, timeout=120, volumes={VOLUME_ROOT: volume})
+@app.function(image=image, cpu=2, timeout=3600, volumes={VOLUME_ROOT: volume})
 def _eval_case_remote(case_dict: dict, model_name: str, beam_width: int,
-                      timeout_nn: float, timeout_dlx: float) -> dict:
+                      nn_only: bool = False) -> dict:
     import sys
     import time
     sys.path.insert(0, "/root/polycube")
 
     from pathlib import Path as P
-    from hybrid_solver import hybrid_solve
     from grading_harness import verify_solution
 
     model_path = P("/root/polycube/phase2/trained_models") / f"{model_name}.pt"
@@ -114,16 +111,30 @@ def _eval_case_remote(case_dict: dict, model_name: str, beam_width: int,
 
     t0 = time.time()
     try:
-        raw = hybrid_solve(
-            pieces,
-            grid_size=grid_size,
-            model_name=model_name,
-            beam_width=beam_width,
-            timeout_nn=timeout_nn,
-            timeout_dlx=timeout_dlx,
-            device="cpu",
-            verbose=False,
-        )
+        if nn_only:
+            from phase2.nn_solver import solve_with_nn
+            nn_result = solve_with_nn(
+                pieces,
+                grid_size=grid_size,
+                model_name=model_name,
+                beam_width=beam_width,
+                timeout=1e9,
+                device="cpu",
+            )
+            raw = {"solution": nn_result, "submethod": "nn_only" if nn_result is not None else "nn_failed"}
+        else:
+            from hybrid_solver import solve_size_gated
+            raw = solve_size_gated(
+                pieces,
+                grid_size=grid_size,
+                model_name=model_name,
+                beam_width=beam_width,
+                timeout_nn=1e9,
+                timeout_dlx=None,
+                device="cpu",
+                verbose=False,
+                allow_preplaced_fastpath=False,
+            )
     except Exception as e:
         raw = {"solution": None, "submethod": f"solver_error:{type(e).__name__}"}
     elapsed = time.time() - t0
@@ -174,28 +185,29 @@ def _eval_case_remote(case_dict: dict, model_name: str, beam_width: int,
 def main(
     model_name: str = MODEL,
     beam_width: int = BEAM_WIDTH,
-    timeout_nn: float = TIMEOUT_NN,
-    timeout_dlx: float = TIMEOUT_DLX,
+    nn_only: bool = False,
 ):
     fixture = _load_or_generate_fixture()
     cases = fixture["cases"]
     print(f"Loaded {len(cases)} cases — dispatching to Modal...")
 
-    results = list(_eval_case_remote.map(
-        cases,
-        kwargs=dict(model_name=model_name, beam_width=beam_width,
-                    timeout_nn=timeout_nn, timeout_dlx=timeout_dlx),
-        return_exceptions=True,
-    ))
-
     clean = []
-    for i, r in enumerate(results):
+    for i, r in enumerate(_eval_case_remote.map(
+        cases,
+        kwargs=dict(model_name=model_name, beam_width=beam_width, nn_only=nn_only),
+        return_exceptions=True,
+    )):
         if isinstance(r, Exception):
-            print(f"  Case {i} failed remotely: {r}")
+            print(f"  [{i+1}/{len(cases)}] ERROR: {r}")
             clean.append({"case_id": cases[i]["case_id"], "grid_size": cases[i]["grid_size"],
                           "correct": False, "expected_solvable": cases[i]["expected_solvable"],
                           "time_sec": 0, "error": str(r)})
         else:
+            mark = "✓" if r["correct"] else "✗"
+            print(f"  [{i+1}/{len(cases)}] {mark} grid={r['grid_size']}^3  "
+                  f"solvable={r['expected_solvable']}  "
+                  f"submethod={r.get('submethod','')}  "
+                  f"t={r['time_sec']:.1f}s")
             clean.append(r)
 
     _score_and_print(clean)
