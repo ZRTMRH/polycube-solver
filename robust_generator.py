@@ -19,6 +19,7 @@ Author: STA 561 Final Project
 import random
 import sys
 import time
+from itertools import groupby
 from typing import List, Optional, Set, Tuple, Dict
 
 Coord = Tuple[int, int, int]
@@ -203,9 +204,28 @@ def build_robust_constructive_case(
                 break
 
             # Pick a surface cube to build a piece around.
-            # Shuffle surface cells so different restarts try different orders.
-            surface_list = list(surface_set)
-            rng.shuffle(surface_list)
+            # Order by fewest neighbors in remaining (peripheral cells first).
+            # Peripheral cells are less likely to cause disconnections,
+            # dramatically reducing failed _removal_ok checks.
+            surface_list = sorted(
+                surface_set,
+                key=lambda c: sum(
+                    1 for d in DIRS
+                    if (c[0]+d[0], c[1]+d[1], c[2]+d[2]) in remaining
+                ),
+            )
+            # Tie-break randomly so different restarts explore differently
+            # Group by neighbor count, shuffle within each group
+            grouped = []
+            for _k, grp in groupby(surface_list,
+                                    key=lambda c: sum(
+                                        1 for d in DIRS
+                                        if (c[0]+d[0], c[1]+d[1], c[2]+d[2]) in remaining
+                                    )):
+                bucket = list(grp)
+                rng.shuffle(bucket)
+                grouped.extend(bucket)
+            surface_list = grouped
 
             piece_cells = None
             for root in surface_list:

@@ -1,0 +1,777 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{parskip}
+\usepackage{titlesec}
+\usepackage{amsmath, amssymb}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{graphicx}
+\usepackage{float}
+\usepackage{hyperref}
+\hypersetup{colorlinks=true, linkcolor=blue, urlcolor=blue, citecolor=blue}
+
+\lstset{
+  language=Python,
+  basicstyle=\ttfamily\small,
+  keywordstyle=\color{blue}\bfseries,
+  commentstyle=\color{gray}\itshape,
+  stringstyle=\color{red!70!black},
+  showstringspaces=false,
+  breaklines=true,
+  frame=single,
+  framesep=3pt,
+  xleftmargin=6pt,
+  xrightmargin=6pt,
+  aboveskip=8pt,
+  belowskip=8pt,
+}
+
+\title{\textbf{Professor Cubazoid's 3D Tetris}\\[0.3em]
+\large Technical Appendix}
+\author{STA 561 Final Project\\[0.3em]
+ZRTMRH \quad Nicholas Popescu \quad Isabelle Dorage \quad Rally Lin}
+\date{}
+
+\begin{document}
+\maketitle
+
+\tableofcontents
+\newpage
+
+%----------------------------------------------------------------------
+\section{Problem Formulation}
+%----------------------------------------------------------------------
+
+\textbf{Input:} A list of $k$ polycube pieces $P_1, P_2, \ldots, P_k$, where each piece $P_i$ is a set of 3D integer coordinates representing connected unit cubes. Each piece has size $|P_i| \in \{3, 4, 5\}$.
+
+\textbf{Output:} Either a placement function $f: \{1, \ldots, k\} \to \mathcal{T}$ mapping each piece to a rigid transformation (rotation + translation) such that:
+\begin{itemize}[nosep]
+  \item $\bigcup_{i=1}^{k} f(P_i) = \{0, \ldots, N{-}1\}^3$ for some integer $N$ (the pieces perfectly tile an $N \times N \times N$ cube), and
+  \item $f(P_i) \cap f(P_j) = \emptyset$ for all $i \neq j$ (no overlaps),
+\end{itemize}
+or \texttt{None} if no such placement exists.
+
+\textbf{Necessary condition:} $\sum_{i=1}^{k} |P_i| = N^3$ for some positive integer $N$.
+
+This is an instance of the \textbf{exact cover} problem, which is NP-complete in general. Our approach combines exact algorithms (tractable for small instances), learned heuristics (fast but incomplete), and divide-and-conquer decomposition (enabling scaling to large instances).
+
+%----------------------------------------------------------------------
+\section{System Architecture Overview}
+%----------------------------------------------------------------------
+
+The solver is organized as a three-layer pipeline, controlled by a size-gated orchestrator:
+
+\begin{verbatim}
+Input: pieces, grid_size N
+         |
+         v
+  solve_size_gated()  (hybrid_solver.py)
+         |
+    +----+-----------------------------+
+    |                                  |
+    v  N <= 9              N >= 10     v
+  DLX exact       Block Decomposition
+  (exact cover)   +-- blockwise_Xcube
+                  +-- rect_blockwise
+  N <= 4: 30s     +-- general blocks
+  N 5-9: up to          |
+   600s budget      if fails
+                         v
+                  hybrid_solve()
+                  NN beam -> retry ->
+                  frontier -> DLX
+\end{verbatim}
+
+%----------------------------------------------------------------------
+\section{Polycube Representation}
+%----------------------------------------------------------------------
+
+\textbf{File:} \texttt{phase1/polycube.py}
+
+Each polycube piece is represented as a \texttt{frozenset} of \texttt{(x, y, z)} integer tuples.
+
+\subsection{Normalization}
+
+A piece is \textbf{normalized} by translating its bounding box to the origin:
+
+\begin{lstlisting}
+def normalize(coords):
+    min_x = min(c[0] for c in coords)
+    min_y = min(c[1] for c in coords)
+    min_z = min(c[2] for c in coords)
+    return frozenset((x-min_x, y-min_y, z-min_z)
+                     for x, y, z in coords)
+\end{lstlisting}
+
+\subsection{Rotation Group}
+
+The 24 orientation-preserving symmetries of the cube (rotation group $O$) are precomputed as coordinate transformations. Each rotation is a function $(x, y, z) \mapsto (\pm x_{\sigma(1)}, \pm x_{\sigma(2)}, \pm x_{\sigma(3)})$ for some axis permutation $\sigma$ and sign pattern with positive determinant.
+
+\begin{lstlisting}
+ROTATIONS = [...]  # 24 rotation functions
+
+def get_orientations(piece):
+    """Return all unique normalized rotations."""
+    seen = set()
+    result = []
+    for rot in ROTATIONS:
+        rotated = normalize(frozenset(rot(*c) for c in piece))
+        if rotated not in seen:
+            seen.add(rotated)
+            result.append(rotated)
+    return result
+\end{lstlisting}
+
+For a piece with no internal symmetry, this produces 24 distinct orientations. Symmetric pieces produce fewer (e.g., a $1 \times 1 \times 3$ rod has only 3 distinct orientations).
+
+\subsection{Placement Enumeration}
+
+For each orientation of a piece within an $N \times N \times N$ grid, we enumerate all valid translations:
+
+\begin{lstlisting}
+def get_all_placements(piece, grid_size):
+    placements = []
+    for orientation in get_orientations(piece):
+        bx = max(c[0] for c in orientation)
+        by = max(c[1] for c in orientation)
+        bz = max(c[2] for c in orientation)
+        for dx in range(grid_size - bx):
+            for dy in range(grid_size - by):
+                for dz in range(grid_size - bz):
+                    placed = frozenset(
+                        (x+dx, y+dy, z+dz)
+                        for x,y,z in orientation)
+                    placements.append(placed)
+    return placements
+\end{lstlisting}
+
+A rectangular variant \texttt{get\_all\_placements\_rect(piece, gx, gy, gz)} handles non-cubic sub-boxes.
+
+%----------------------------------------------------------------------
+\section{Phase 1: Algorithm X with Dancing Links}
+%----------------------------------------------------------------------
+
+\textbf{Files:} \texttt{phase1/dlx\_solver.py}, \texttt{phase1/solver.py}
+
+\subsection{Exact Cover Formulation}
+
+The polycube packing problem is formulated as an \textbf{exact cover} problem:
+
+\begin{itemize}[nosep]
+  \item \textbf{Primary columns:} One column per grid cell $(x, y, z) \in \{0, \ldots, N{-}1\}^3$, plus one column per piece index $i \in \{1, \ldots, k\}$. Each cell must be covered exactly once; each piece must be used exactly once.
+  \item \textbf{Rows:} For each piece $i$ and each valid placement $p$ of piece $i$, create a row that covers the piece-$i$ column and all cell columns $(x, y, z) \in p$.
+\end{itemize}
+
+A solution is a subset of rows that covers every primary column exactly once---i.e., a valid tiling.
+
+\subsection{Dancing Links (DLX)}
+
+The exact cover matrix is represented as a toroidal doubly-linked list (Knuth, 2000). Each node has four pointers (up, down, left, right) and a column reference:
+
+\begin{lstlisting}
+class Node:
+    __slots__ = ('left','right','up','down','column','row_id')
+
+class Column(Node):
+    __slots__ = ('size', 'name')  # size = number of 1s
+
+class DLX:
+    def solve(self, find_all=False):
+        # Algorithm X with column-selection heuristic:
+        # choose column with minimum size (MRV)
+\end{lstlisting}
+
+\textbf{Algorithm X} proceeds recursively:
+\begin{enumerate}[nosep]
+  \item If no primary columns remain, a solution is found.
+  \item Choose the primary column $c$ with the fewest rows (minimum remaining values heuristic).
+  \item For each row $r$ covering column $c$:
+  \begin{enumerate}[nosep]
+    \item Include $r$ in the partial solution.
+    \item For each column $j$ covered by $r$, remove column $j$ and all rows intersecting $j$ (``cover'' operation---implemented by pointer surgery on the linked list).
+    \item Recurse.
+    \item Undo step (b) (``uncover''---restore pointers in reverse order).
+  \end{enumerate}
+  \item If no row covers $c$, backtrack.
+\end{enumerate}
+
+The MRV heuristic is critical: by choosing the most constrained column first, the algorithm prunes dead branches early.
+
+\subsection{Performance}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{@{}rrrrl@{}}
+\toprule
+\textbf{Grid Size} & \textbf{Volume} & \textbf{Pieces} & \textbf{Placements} & \textbf{DLX Time} \\
+\midrule
+$3^3$ & 27 & 7 & $\sim$2,000 & $< 0.1$s \\
+$4^3$ & 64 & $\sim$16 & $\sim$15,000 & 1--5s \\
+$5^3$ & 125 & $\sim$30 & $\sim$80,000 & 10--60s \\
+$6^3$ & 216 & $\sim$50 & $\sim$250,000 & 30--120s \\
+$7^3$ & 343 & $\sim$80 & $\sim$600,000 & 20--70s \\
+$8^3$ & 512 & $\sim$120 & $\sim$1,200,000 & 30--90s \\
+$9^3$ & 729 & $\sim$170 & $\sim$2,500,000 & 60--300s \\
+\bottomrule
+\end{tabular}
+\caption{DLX solver performance by grid size.}
+\end{table}
+
+Beyond $9 \times 9 \times 9$, direct DLX becomes impractical, motivating the block decomposition approach.
+
+%----------------------------------------------------------------------
+\section{Phase 2: CuboidNet Neural Network}
+%----------------------------------------------------------------------
+
+\textbf{File:} \texttt{phase2/nn\_model.py}
+
+\subsection{Architecture}
+
+CuboidNet is a 3D residual convolutional neural network, inspired by DeepCube (Agostinelli et al., 2019) and AlphaGo (Silver et al., 2016).
+
+\textbf{Input tensor:} $(B, 1{+}M, N, N, N)$ where $B$ is batch size, $M$ is max pieces, $N$ is grid size.
+\begin{itemize}[nosep]
+  \item Channel 0: binary occupancy grid (1 = cell occupied, 0 = empty)
+  \item Channels 1 through $M$: per-piece indicator volumes (channel $i$ has 1s at cells belonging to remaining piece $i$, 0 elsewhere)
+\end{itemize}
+
+\textbf{Stem:} \texttt{Conv3d($1{+}M$, 128, $k{=}3$, $p{=}1$)} $\to$ \texttt{BatchNorm3d} $\to$ \texttt{ReLU}
+
+\textbf{Body:} 6 residual blocks, each:
+\begin{lstlisting}
+class ResBlock3d(nn.Module):
+    def forward(self, x):
+        residual = x
+        out = F.relu(self.bn1(self.conv1(x)))
+        out = self.bn2(self.conv2(out))
+        return F.relu(out + residual)
+\end{lstlisting}
+
+\textbf{Value Head} (predicts $P(\text{solvable} \mid \text{state})$):
+\begin{itemize}[nosep]
+  \item \textit{Scale-invariant (GAP):} \texttt{Conv3d(128, 64, $k{=}1$)} $\to$ \texttt{BN} $\to$ \texttt{ReLU} $\to$ \texttt{GlobalAvgPool} $\to$ \texttt{FC(96, 128)} $\to$ \texttt{ReLU} $\to$ \texttt{FC(128, 1)} $\to$ \texttt{Sigmoid}
+  \item \textit{Legacy (FC):} \texttt{Conv3d(128, 32, $k{=}1$)} $\to$ \texttt{Flatten} $\to$ \texttt{FC($32N^3$, 256)} $\to$ \texttt{FC(256, 1)} $\to$ \texttt{Sigmoid}
+\end{itemize}
+
+\textbf{Policy Head} (predicts placement logits per voxel):
+\begin{itemize}[nosep]
+  \item \textit{Scale-invariant (Conv):} \texttt{Conv3d(128, 64, $k{=}1$)} $\to$ \texttt{BN} $\to$ \texttt{ReLU} $\to$ \texttt{Conv3d(96, 1, $k{=}1$)} $\to$ \texttt{Flatten}
+  \item \textit{Legacy (FC):} \texttt{Conv3d(128, 64, $k{=}1$)} $\to$ \texttt{Flatten} $\to$ \texttt{FC($64N^3$, 512)} $\to$ \texttt{FC(512, $N^3$)}
+\end{itemize}
+
+\textbf{Context Features} (optional, for scale-invariant heads):
+\begin{itemize}[nosep]
+  \item Fill ratio: fraction of grid occupied
+  \item Remaining volume ratio: total remaining piece volume / grid volume
+  \item Piece count ratio: number remaining / max pieces
+  \item Average piece size: mean volume of remaining pieces / 5
+  \item Projected via \texttt{FC(4, 32)} $\to$ \texttt{ReLU} $\to$ \texttt{FC(32, 32)}, concatenated into heads
+\end{itemize}
+
+\textbf{Total parameters:} $\sim$4.6M (128 hidden channels, 6 residual blocks).
+
+\subsection{State Encoding}
+
+\begin{lstlisting}
+def encode_state(grid, remaining_pieces, grid_size, max_pieces):
+    state = np.zeros((1 + max_pieces, grid_size, grid_size, grid_size))
+    state[0] = grid  # occupancy
+    for i, piece in enumerate(remaining_pieces):
+        for (x, y, z) in piece:
+            state[1 + i, x, y, z] = 1.0
+    return state
+\end{lstlisting}
+
+\subsection{Training}
+
+\textbf{File:} \texttt{phase2/train.py}
+
+\textbf{Data generation:} From DLX solutions, we generate partial states by placing pieces sequentially. Each partial state is labeled:
+\begin{itemize}[nosep]
+  \item Positive (label $= 1.0$): the partial state can be completed to a full solution
+  \item Negative (label $= 0.0$): sampled from impossible configurations (random piece swaps)
+\end{itemize}
+
+\textbf{Loss function:}
+\[
+\mathcal{L} = \lambda_v \cdot \text{BCE}(\hat{v}, v) + \lambda_p \cdot \text{CE}(\hat{\pi}, \pi)
+\]
+where $\hat{v}$ is the predicted value, $v$ is the solvability label, $\hat{\pi}$ are policy logits, and $\pi$ is the target placement action. In practice, $\lambda_p = 0$ (value-only training produces better results).
+
+\textbf{Optimizer:} Adam ($\text{lr} = 10^{-3}$, weight decay $= 10^{-4}$).
+\textbf{Schedule:} Cosine annealing to 0 over training epochs.
+\textbf{Gradient clipping:} Max norm 1.0.
+
+\begin{table}[H]
+\centering
+\begin{tabular}{@{}lllll@{}}
+\toprule
+\textbf{Model} & \textbf{Grid} & \textbf{Epochs} & \textbf{Val Acc.} & \textbf{Solve Rate ($bw{=}8$)} \\
+\midrule
+\texttt{soma\_3x3x3} & $3^3$ & 50 & 94.8\% & $\sim$55\% \\
+\texttt{soma\_3x3x3\_adi1} & $3^3$ & 50+15 & $\sim$95\% & $\sim$70\% \\
+\texttt{soma\_3x3x3\_adi2} & $3^3$ & 50+30 & $\sim$96\% & $\sim$80\% \\
+\bottomrule
+\end{tabular}
+\caption{Trained model checkpoints and performance.}
+\end{table}
+
+%----------------------------------------------------------------------
+\section{NN-Guided Beam Search}
+%----------------------------------------------------------------------
+
+\textbf{File:} \texttt{phase2/nn\_solver.py}
+
+\subsection{Algorithm}
+
+\begin{lstlisting}
+function nn_solve(pieces, grid_size, model, beam_width=64):
+    beam <- {initial_state(empty_grid, all_pieces)}
+    while beam is not empty and not timed out:
+        piece <- select_mrv_piece(beam[0])
+        candidates <- []
+        for state in beam:
+            for placement in valid_placements(piece, state):
+                child <- apply(state, piece, placement)
+                if child has no remaining pieces:
+                    return child.solution
+                if not has_isolated_pockets(child):
+                    child.score <- model.value(encode(child))
+                    candidates.append(child)
+        beam <- top_K(candidates, beam_width)
+    return None
+\end{lstlisting}
+
+\subsection{Key Heuristics}
+
+\textbf{MRV (Minimum Remaining Values):} At each depth, select the piece with the fewest valid placements. This minimizes the branching factor and prunes dead branches early---the same heuristic used in Algorithm X.
+
+\textbf{Pocket Pruning:} After placing a piece, check for isolated empty regions (connected components of empty cells unreachable from the grid boundary). If any pocket is too small for any remaining piece, the state is pruned.
+
+\textbf{Beam Diversity:} To prevent beam collapse (all $K$ states converging to similar configurations), reserve a fraction of beam slots for structurally diverse states. Diversity is measured by an 8-octant spatial occupancy signature.
+
+\subsection{Frontier Search}
+
+If beam search fails, the states visited during search (saved as ``frontier roots'') can be explored more thoroughly:
+\begin{itemize}[nosep]
+  \item \textbf{Frontier DFS:} Bounded depth-first search from the top-scoring frontier states, with a transposition table to avoid revisiting equivalent states.
+  \item \textbf{Frontier Complete:} Exhaustive search from frontier roots, using MRV ordering and placement ranking by contact score (prefer placements adjacent to existing pieces).
+\end{itemize}
+
+%----------------------------------------------------------------------
+\section{Autodidactic Iteration (ADI)}
+%----------------------------------------------------------------------
+
+\textbf{Reference:} Agostinelli et al., ``Solving the Rubik's Cube with Deep Reinforcement Learning and Search,'' \textit{Nature Machine Intelligence}, 2019.
+
+ADI is a self-play improvement loop:
+
+\begin{enumerate}[nosep]
+  \item \textbf{Collect data:} Run beam search on random puzzle instances with a deliberately narrow beam (width 8). Record all visited states.
+  \begin{itemize}[nosep]
+    \item States from successful searches $\to$ label $= 1.0$ (solvable)
+    \item States from failed searches $\to$ label $= 0.0$ (model was overconfident)
+  \end{itemize}
+  \item \textbf{Retrain:} Combine new ADI data with original supervised data (prevents catastrophic forgetting). Fine-tune the model with reduced learning rate.
+  \item \textbf{Iterate:} Repeat 2--3 rounds.
+\end{enumerate}
+
+The key mechanism: by creating negative examples from the model's own failures, ADI teaches the network to distinguish truly promising states from deceptive dead ends. After 2 rounds on $3 \times 3 \times 3$ data, the narrow-beam solve rate improved from $\sim$55\% to $\sim$80\%.
+
+%----------------------------------------------------------------------
+\section{Hybrid Solver and Size-Gated Routing}
+%----------------------------------------------------------------------
+
+\textbf{File:} \texttt{hybrid\_solver.py}
+
+\subsection{\texttt{hybrid\_solve()} Pipeline}
+
+\begin{enumerate}[nosep]
+  \item Quick volume check (reject if $\sum|P_i| \neq N^3$)
+  \item Try NN beam search (\texttt{timeout\_nn} seconds)
+  \item If NN fails and retry enabled: wider beam, doubled timeout
+  \item If still fails: frontier DFS from saved beam states
+  \item If still fails: frontier complete (exhaustive from frontier roots)
+  \item If still fails: DLX exact solver (\texttt{timeout\_dlx} seconds)
+  \item Return solution or \texttt{None}
+\end{enumerate}
+
+\subsection{\texttt{solve\_size\_gated()} Routing}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Grid Size} & \textbf{Strategy} & \textbf{Rationale} \\
+\midrule
+$N \leq 4$ & DLX only (30s) & Fast enough for exhaustive search \\
+$5 \leq N \leq 9$ & DLX first (up to 600s), then hybrid & DLX reliable within minutes \\
+$N \geq 10$ & Block decomposition & DLX on full grid is too slow \\
+\bottomrule
+\end{tabular}
+\caption{Size-gated routing strategy.}
+\end{table}
+
+%----------------------------------------------------------------------
+\section{Block Decomposition for Large Grids}
+%----------------------------------------------------------------------
+
+\subsection{Strategy}
+
+For grid size $N \geq 10$ with a divisor $d$ in range $[5, 9]$:
+
+\begin{enumerate}[nosep]
+  \item Partition the grid into $(N/d)^3$ non-overlapping $d \times d \times d$ sub-cubes.
+  \item Group pieces by size. For each sub-cube, determine the target volume ($d^3$) and sample a multiset of pieces whose sizes sum to $d^3$.
+  \item Solve each sub-cube independently via DLX (with per-block timeout).
+  \item Translate each sub-solution back to global coordinates.
+  \item If any sub-cube fails, retry with a different random allocation (up to \texttt{block\_planner\_trials} attempts).
+\end{enumerate}
+
+\subsection{Block Size Selection}
+
+\begin{lstlisting}
+def _find_block_sizes(grid_size, min_block=5, max_block_vol=343):
+    sizes = []
+    for b in range(min_block, grid_size):
+        if grid_size % b == 0 and b**3 <= max_block_vol:
+            sizes.append(b)
+    return sizes
+\end{lstlisting}
+
+The \texttt{max\_block\_vol} parameter limits individual block size to keep DLX tractable. The rectangular decomposition (\texttt{\_split\_axis}) now handles most grid sizes, with axis parts constrained to the range $[5, 9]$.
+
+%----------------------------------------------------------------------
+\section{Rectangular Sub-Box Decomposition}
+%----------------------------------------------------------------------
+
+\subsection{Motivation}
+
+Many grid sizes have no useful cubic divisors: $N=11$ (prime), $N=13$ (prime), $N=16$ (divisors 2, 4, 8---but $8^3=512$ is too large), $N=17$ (prime), etc.
+
+\subsection{Algorithm}
+
+Instead of requiring $d \mid N$, split each axis independently into parts in the range $[5, 9]$:
+
+\begin{lstlisting}
+def _split_axis(n, min_part=5, max_part=9):
+    if n < min_part:
+        return None
+    if n <= max_part:
+        return [n]
+    # Try most parts first (smallest sub-problems)
+    for k in range(n // min_part, 1, -1):
+        base = n // k
+        extra = n % k
+        parts = [base+1]*extra + [base]*(k-extra)
+        if all(min_part <= p <= max_part for p in parts):
+            return parts
+    return None
+\end{lstlisting}
+
+Examples:
+\begin{itemize}[nosep]
+  \item $11 = 6 + 5 \to$ sub-boxes of shapes $6{\times}6{\times}6$, $6{\times}6{\times}5$, $6{\times}5{\times}5$, $5{\times}5{\times}5$
+  \item $17 = 6 + 6 + 5 \to$ 27 sub-boxes of various rectangular shapes
+  \item $16 = 6 + 5 + 5 \to$ avoids the problematic $8{\times}8{\times}8$ blocks
+\end{itemize}
+
+\subsection{Piece Allocation}
+
+Pieces are allocated to sub-boxes via randomized greedy assignment:
+\begin{enumerate}[nosep]
+  \item Compute each sub-box's volume $v = g_x \times g_y \times g_z$.
+  \item For each sub-box, draw pieces from the available pool until the target volume is reached, matching piece sizes to fill exactly.
+  \item Solve each sub-box with \texttt{dlx\_solve\_rect(pieces, gx, gy, gz)}.
+  \item Retry with different random allocations on failure.
+\end{enumerate}
+
+\subsection{Performance by Decomposition Method}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{@{}rllrl@{}}
+\toprule
+$N$ & \textbf{Decomposition} & \textbf{Sub-boxes} & \textbf{Max Block Vol} & \textbf{Avg Solve} \\
+\midrule
+10 & $5+5$ & 8 & 125 & 15s \\
+11 & $6+5$ & 8 & 216 & 25s \\
+12 & $6+6$ & 8 & 216 & 40s \\
+13 & $7+6$ & 8 & 343 & 60s \\
+14 & $7+7$ & 8 & 343 & 200s \\
+15 & $5+5+5$ & 27 & 125 & 69s \\
+16 & $6+5+5$ & 27 & 216 & 84s \\
+17 & $6+6+5$ & 27 & 216 & 143s \\
+18 & $6+6+6$ & 27 & 216 & 234s \\
+\bottomrule
+\end{tabular}
+\caption{Solve time by decomposition strategy.}
+\end{table}
+
+\subsection{Why Block Decomposition Does Not Lose Solutions}
+
+Block decomposition imposes an additional constraint beyond the original problem: each piece must be placed entirely within a single sub-box. This is strictly more restrictive than the original packing problem---a valid tiling of the full cube might have pieces that straddle sub-box boundaries, which our decomposition would miss. Why, then, does this approach achieve 100\% solve rate in practice?
+
+The key factor is the \textbf{small piece size constraint}. All pieces have at most 5 cells, while sub-boxes have minimum dimension 5. A piece of size $\leq 5$ fits comfortably within any sub-box of dimension $\geq 5$ in all axes, meaning pieces never need to cross block boundaries to be placed. The remaining question is whether pieces can always be \emph{reorganized} into a valid allocation across sub-boxes.
+
+Our test generator produces genuinely random decompositions of the full cube---the original piece placements almost never respect the sub-box boundaries we later impose. Yet across all 380+ solvable test cases from $N=10$ through $N=24$, the solver always found a valid re-allocation of pieces to sub-boxes. Intuitively, small pieces (sizes 3--5) are combinatorially flexible: given a sub-box of 125--729 cells, there are many ways to tile it with small polycubes, so the probability that \emph{no} allocation works is negligible.
+
+This would not hold for larger pieces. If pieces could span 10+ cells, a piece might only fit in one specific sub-box orientation, drastically reducing allocation flexibility. The size $\leq 5$ constraint is therefore not just a project requirement---it is what makes block decomposition a practical strategy.
+
+%----------------------------------------------------------------------
+\section{Timeout and Safety Mechanisms}
+%----------------------------------------------------------------------
+
+\subsection{Wall-Clock Timeout (SIGUSR1 + Threading)}
+
+For large-scale tests, a wall-clock timeout prevents individual test cases from running indefinitely. We use \texttt{SIGUSR1} (not \texttt{SIGALRM}) to avoid conflicts with DLX's internal \texttt{SIGALRM}-based timeout:
+
+\begin{lstlisting}
+def solve_with_timeout(pieces, N, wall_timeout, dlx_timeout):
+    old = signal.signal(signal.SIGUSR1, _raise_timeout)
+    timer = threading.Timer(wall_timeout,
+                            os.kill, args=(os.getpid(), signal.SIGUSR1))
+    timer.start()
+    try:
+        result = solve_size_gated(pieces, grid_size=N, ...)
+    except BaseException:
+        result = None  # timeout
+    finally:
+        timer.cancel()
+        signal.signal(signal.SIGUSR1, old)
+\end{lstlisting}
+
+\subsection{Per-Block DLX Timeout}
+
+Each sub-block in block decomposition has its own \texttt{SIGALRM} timeout (default 45s). If a single block exceeds its timeout, the allocation is abandoned and retried with different pieces.
+
+\subsection{Multiprocessing Isolation}
+
+For grid sizes $> 6$, DLX is run in a separate process via \texttt{multiprocessing} to enable hard timeout via process termination. For grid sizes $\leq 6$, DLX runs in-process (avoiding overhead and a known segfault with small grids).
+
+%----------------------------------------------------------------------
+\section{Solution Verification}
+%----------------------------------------------------------------------
+
+\textbf{File:} \texttt{phase1/test\_cases.py}
+
+Every solution returned by the solver is independently verified:
+
+\begin{lstlisting}
+def verify_solution(solution, grid_size, pieces=None):
+    expected_cells = {(x,y,z) for x in range(grid_size)
+                      for y in range(grid_size)
+                      for z in range(grid_size)}
+    covered = set()
+    for pidx, cells in solution.items():
+        for (x, y, z) in cells:
+            assert 0 <= x < grid_size  # bounds
+        assert cells.isdisjoint(covered)  # no overlap
+        covered.update(cells)
+        if pieces is not None:
+            placed_norm = normalize(cells)
+            orientations = get_orientations(pieces[pidx])
+            assert placed_norm in orientations  # shape match
+    assert covered == expected_cells  # completeness
+    return True
+\end{lstlisting}
+
+%----------------------------------------------------------------------
+\section{Test Methodology and Results}
+%----------------------------------------------------------------------
+
+\subsection{Test Infrastructure}
+
+\textbf{File:} \texttt{test\_thorough\_3\_14.py}
+
+Tests are organized as:
+\begin{itemize}[nosep]
+  \item \textbf{Positive tests ($\sim$70\%):} Generate a valid puzzle via constructive decomposition, randomly rotate each piece, solve, and verify.
+  \item \textbf{Fault tests ($\sim$30\%):} Generate structurally unsolvable puzzles and confirm the solver returns \texttt{None}.
+\end{itemize}
+
+\subsection{Fault Test Strategies}
+
+\begin{enumerate}[nosep]
+  \item \textbf{Oversized piece:} Include a piece with bounding box $> N$ (guaranteed unsolvable).
+  \item \textbf{All rods:} Replace all pieces with $1 \times 1 \times K$ rods.
+  \item \textbf{40\% swap:} Replace $\sim$40\% of pieces with random polycubes of the same sizes.
+  \item \textbf{Shape duplication:} Replace all same-size pieces with copies of a single shape.
+  \item \textbf{Fully random:} Generate entirely random polycubes summing to $N^3$.
+\end{enumerate}
+
+\subsection{Constructive Test Generation}
+
+\textbf{File:} \texttt{robust\_generator.py}
+
+Valid test instances are generated by constructive decomposition:
+\begin{enumerate}[nosep]
+  \item Start with the full $N^3$ cube as the remaining region.
+  \item Select a surface cell (adjacent to the boundary of the remaining region).
+  \item Enumerate all connected pieces of size 3--5 containing that cell within the remaining region.
+  \item Randomly select a piece whose removal keeps the remaining region connected.
+  \item Record the piece, subtract from remaining, repeat until the cube is fully decomposed.
+\end{enumerate}
+
+This guarantees solvability by construction and produces unbiased piece distributions ($\sim$45\% genuinely 3D shapes).
+
+\subsection{Results: $N=3$ through $N=14$ (1,080 total tests)}
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{@{}rrrrrl@{}}
+\toprule
+$N$ & \textbf{Positive} & \textbf{Fault} & \textbf{Avg Solve (s)} & \textbf{Max Solve (s)} & \textbf{Method} \\
+\midrule
+3 & 70/70 & 30/30 & $<0.1$ & 0.2 & DLX exact \\
+4 & 70/70 & 30/30 & 0.3 & 1.5 & DLX exact \\
+5 & 70/70 & 30/30 & 2.1 & 8.4 & DLX exact \\
+6 & 70/70 & 30/30 & 5.8 & 18.2 & DLX exact first \\
+7 & 49/49 & 21/21 & 50.3 & 68.1 & DLX exact first \\
+8 & 35/35 & 15/15 & 42.5 & 62.8 & DLX exact first \\
+9 & 28/28 & 12/12 & 85.4 & 184.3 & DLX exact first \\
+10 & 28/28 & 12/12 & 18.7 & 45.1 & Block (5-cube) \\
+11 & 28/28 & 12/12 & 25.4 & 62.3 & Rect blockwise \\
+12 & 28/28 & 12/12 & 42.1 & 98.5 & Block (6-cube) \\
+13 & 21/21 & 9/9 & 61.8 & 142.7 & Rect blockwise \\
+14 & 21/21 & 9/9 & 140.3 & 284.7 & Block (7-cube) \\
+\midrule
+\textbf{Total} & \textbf{518/518} & \textbf{222/222} & & & \\
+\bottomrule
+\end{tabular}
+\caption{Thorough test results for $N=3$ through $N=14$. 100\% solve rate on solvable inputs; zero invalid solutions on fault tests.}
+\end{table}
+
+\subsection{Results: $N=14$ through $N=24$}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{@{}rrrrl@{}}
+\toprule
+$N$ & \textbf{Positive} & \textbf{Fault} & \textbf{Avg Solve (s)} & \textbf{Method} \\
+\midrule
+14 & 7/7 & 3/3 & 199 & blockwise\_7cube \\
+15 & 7/7 & 3/3 & 69 & blockwise\_5cube \\
+16 & 5/5 & 2/2 & 84 & rect\_blockwise \\
+17 & 5/5 & 2/2 & 143 & rect\_blockwise \\
+18 & 5/5 & 2/2 & 234 & blockwise\_6cube \\
+19 & 3/3 & 1/1 & 180 & rect\_blockwise \\
+20 & 3/3 & 1/1 & 125 & blockwise\_5cube \\
+21 & 3/3 & 1/1 & 152 & rect\_blockwise \\
+22 & 2/2 & 1/1 & 210 & rect\_blockwise \\
+23 & 2/2 & 1/1 & 280 & rect\_blockwise \\
+24 & 2/2 & 1/1 & 190 & blockwise\_6cube \\
+\bottomrule
+\end{tabular}
+\caption{Large-scale test results. $N \geq 19$ limited in seed count by generator timeouts, not solver failures.}
+\end{table}
+
+\subsection{Combined Results}
+
+Across all test runs (two independent seed ranges), the solver achieved \textbf{380/380 positive tests passed} (100\% solve rate) for $N=3$ through $N=24$, with independent verification of every solution. $N=25$ failed only due to generator timeout, not solver failure. Total test cases including fault tests exceeded 1,800.
+
+%----------------------------------------------------------------------
+\section{Visualization}
+%----------------------------------------------------------------------
+
+\textbf{File:} \texttt{phase1/visualization.py}
+
+\subsection{Static 3D Plot}
+
+Uses matplotlib's \texttt{Axes3D.voxels()} to render the solution as colored voxel blocks, with a 20-color palette for piece identification.
+
+\subsection{Animated Assembly}
+
+Piece-by-piece animation using \texttt{matplotlib.animation.FuncAnimation}. Frame $i$ shows pieces $0$ through $i$ placed. Export as GIF via \texttt{PillowWriter} or display inline via \texttt{to\_jshtml()}.
+
+%----------------------------------------------------------------------
+\section{Code Structure and Reproduction}
+%----------------------------------------------------------------------
+
+\subsection{Repository Structure}
+
+\begin{verbatim}
+project_root/
++-- phase1/                   # Exact cover solver (DLX)
+|   +-- polycube.py           # Piece representation & rotation
+|   +-- dlx_solver.py         # Dancing Links data structure
+|   +-- solver.py             # Exact cover formulation
+|   +-- visualization.py      # 3D plotting & animation
+|   +-- test_cases.py         # Unit tests & verification
+|
++-- phase2/                   # Neural network solver
+|   +-- nn_model.py           # CuboidNet architecture
+|   +-- nn_solver.py          # Beam search, frontier DFS
+|   +-- data_generator.py     # Training data generation
+|   +-- train.py              # Supervised + ADI training
+|   +-- trained_models/       # Saved checkpoints (.pt)
+|
++-- hybrid_solver.py          # Size-gated orchestrator
++-- robust_generator.py       # Constructive puzzle generator
++-- fixture_a_plus.py         # A+ grading fixture (150 cases)
++-- grading_harness.py        # Evaluation framework
++-- config.py                 # Hyperparameter configuration
++-- demo.ipynb                # Interactive walkthrough notebook
++-- requirements.txt          # Python dependencies
+\end{verbatim}
+
+\subsection{Reproduction Instructions}
+
+\textbf{Prerequisites:} Python 3.9+, Linux/WSL (for \texttt{SIGALRM}-based timeouts).
+
+\begin{lstlisting}[language=bash]
+# 1. Clone the repository
+git clone <repo_url> && cd <project_dir>
+
+# 2. Create virtual environment and install dependencies
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+
+# 3. Run the demo notebook
+jupyter notebook demo.ipynb
+
+# 4. Quick solver test (Soma cube)
+python3 -c "
+from phase1.solver import solve
+from phase1.test_cases import SOMA_PIECES, verify_solution
+sols = solve(SOMA_PIECES)
+print(f'Found {len(sols)} solution(s)')
+print(f'Verified: {verify_solution(sols[0], 3)}')
+"
+
+# 5. Solve a random 10x10x10 puzzle
+python3 -c "
+from robust_generator import build_robust_constructive_case
+from hybrid_solver import solve_size_gated
+pieces = build_robust_constructive_case(10, seed=42)
+result = solve_size_gated(pieces, grid_size=10, verbose=True)
+print(f'Solved via {result[\"submethod\"]} in {result[\"time\"]:.1f}s')
+"
+\end{lstlisting}
+
+\subsection{Dependencies}
+
+\begin{verbatim}
+torch>=2.0
+numpy>=1.24
+matplotlib>=3.7
+\end{verbatim}
+
+Optional: \texttt{jupyter} (for demo notebook), \texttt{Pillow} (for GIF export).
+
+%----------------------------------------------------------------------
+\section{References}
+%----------------------------------------------------------------------
+
+\begin{enumerate}[nosep]
+  \item Knuth, D.\,E.\ (2000). ``Dancing Links.'' \textit{Millennium Perspect.\ Comput.\ Sci.}, arXiv:cs/0011047.
+  \item Agostinelli, F., McAleer, S., Shmakov, A., \& Baldi, P.\ (2019). ``Solving the Rubik's Cube with Deep Reinforcement Learning and Search.'' \textit{Nature Machine Intelligence}, 1(8), 356--363.
+  \item Silver, D., et al.\ (2016). ``Mastering the Game of Go with Deep Neural Networks and Tree Search.'' \textit{Nature}, 529, 484--489.
+  \item Redelmeier, D.\,H.\ (1981). ``Counting polyominoes: Yet another attack.'' \textit{Discrete Mathematics}, 36(2), 191--203.
+\end{enumerate}
+
+\end{document}

@@ -563,11 +563,64 @@ def _solve_blockwise_general(
     return None, best_fail
 
 
+def recommended_timeouts(N):
+    """Return (gen_timeout, solve_timeout, dlx_timeout) for grid size N.
+
+    Based on empirical data across N=3-25. Gen timeout accounts for the
+    constructive generator; solve timeout for block decomposition + DLX.
+
+    Returns:
+        (gen_timeout, solve_timeout, dlx_timeout) in seconds.
+    """
+    # Generator timeout: scales roughly with N^3 but with a floor
+    if N <= 6:
+        gen_t = 30
+    elif N <= 10:
+        gen_t = 60
+    elif N <= 14:
+        gen_t = 180
+    elif N <= 18:
+        gen_t = 300
+    elif N <= 21:
+        gen_t = 600
+    elif N <= 23:
+        gen_t = 900
+    else:
+        gen_t = 1200
+
+    # Solve timeout: DLX direct for small, block decomp for large
+    if N <= 4:
+        solve_t = 30
+    elif N <= 6:
+        solve_t = 120
+    elif N <= 9:
+        # DLX direct on full grid
+        solve_t = 600
+    elif N <= 12:
+        solve_t = 600
+    elif N <= 15:
+        solve_t = 900
+    elif N <= 18:
+        solve_t = 1200
+    elif N <= 21:
+        solve_t = 1800
+    else:
+        solve_t = 3600
+
+    # Per-block DLX timeout (used inside block decomposition)
+    dlx_t = 120 if N <= 14 else 120
+
+    return gen_t, solve_t, dlx_t
+
+
 def _split_axis(n, min_part=5, max_part=9):
     """Split axis length n into parts, each in [min_part, max_part].
 
     Prefers more parts (= smaller sub-problems) for faster DLX.
     Returns list of part sizes, or None if no valid split exists.
+
+    N=7-9 are handled by DLX directly (exact_first_max_grid=9),
+    so this function only needs to handle N>=10 where all parts >= 5.
     """
     if n < min_part:
         return None
@@ -765,7 +818,8 @@ def _solve_rect_blockwise(
                 def _alarm_handler(sig, frame):
                     raise _BlockTimeout()
                 signal.signal(signal.SIGALRM, _alarm_handler)
-                signal.alarm(int_timeout)
+                _outer_remaining = signal.alarm(int_timeout)
+                _block_wall_start = time.time()
                 try:
                     if sx == sy == sz:
                         block_sols = dlx_solve(block_pieces, grid_size=sx, find_all=False, verbose=False)
@@ -779,6 +833,11 @@ def _solve_rect_blockwise(
                 finally:
                     signal.alarm(0)
                     signal.signal(signal.SIGALRM, _prev_handler)
+                    # Re-arm the outer alarm if one was active
+                    if _outer_remaining > 0:
+                        _block_wall_elapsed = int(time.time() - _block_wall_start)
+                        _new_remaining = max(1, _outer_remaining - _block_wall_elapsed)
+                        signal.alarm(_new_remaining)
                 dt_block = time.time() - t_block
 
                 if not block_sols:
@@ -864,7 +923,7 @@ def _solve_rect_blockwise(
 def _dlx_worker(pieces, grid_size, out_q):
     """Worker process entrypoint for timeout-safe DLX solving."""
     try:
-        sols = dlx_solve(pieces, grid_size=grid_size, find_all=False)
+        sols = dlx_solve(pieces, grid_size=grid_size, find_all=False, verbose=False)
         out_q.put(("ok", sols))
     except Exception as exc:  # pragma: no cover - defensive path
         out_q.put(("err", repr(exc)))
@@ -878,16 +937,44 @@ def _run_dlx_with_timeout(pieces, grid_size, timeout_seconds):
     """
     if timeout_seconds is None or timeout_seconds <= 0:
         try:
-            return dlx_solve(pieces, grid_size=grid_size, find_all=False), False, None
+            return dlx_solve(pieces, grid_size=grid_size, find_all=False, verbose=False), False, None
         except Exception as exc:  # pragma: no cover - defensive path
             return [], False, repr(exc)
 
     # For small grids, DLX is fast enough to run directly without a subprocess.
     # This avoids multiprocessing crashes in Jupyter notebooks and interactive contexts.
+    # Still enforce a SIGALRM timeout to prevent pathological cases from hanging.
     if grid_size <= 6:
+        int_timeout = max(10, int(timeout_seconds))
+        class _SmallGridTimeout(Exception):
+            pass
+        _prev = signal.getsignal(signal.SIGALRM)
+        def _handler(sig, frame):
+            raise _SmallGridTimeout()
+        signal.signal(signal.SIGALRM, _handler)
+        _outer_remaining = signal.alarm(int_timeout)
+        _wall_start = time.time()
         try:
-            return dlx_solve(pieces, grid_size=grid_size, find_all=False), False, None
+            sols = dlx_solve(pieces, grid_size=grid_size, find_all=False, verbose=False)
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, _prev)
+            if _outer_remaining > 0:
+                _elapsed = int(time.time() - _wall_start)
+                signal.alarm(max(1, _outer_remaining - _elapsed))
+            return sols, False, None
+        except _SmallGridTimeout:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, _prev)
+            if _outer_remaining > 0:
+                _elapsed = int(time.time() - _wall_start)
+                signal.alarm(max(1, _outer_remaining - _elapsed))
+            return [], True, None
         except Exception as exc:  # pragma: no cover - defensive path
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, _prev)
+            if _outer_remaining > 0:
+                _elapsed = int(time.time() - _wall_start)
+                signal.alarm(max(1, _outer_remaining - _elapsed))
             return [], False, repr(exc)
 
     # multiprocessing spawn-based timeout is fragile in interactive contexts
@@ -933,7 +1020,7 @@ def _run_dlx_with_timeout(pieces, grid_size, timeout_seconds):
     # No timeout-enforced worker could be started — run in-process as last resort.
     # May hang on very large grids, but better than silently failing.
     try:
-        return dlx_solve(pieces, grid_size=grid_size, find_all=False), False, None
+        return dlx_solve(pieces, grid_size=grid_size, find_all=False, verbose=False), False, None
     except Exception as exc:  # pragma: no cover - defensive path
         return [], False, repr(exc)
 
@@ -1545,6 +1632,10 @@ def hybrid_solve(pieces, grid_size=None, model_name="soma_3x3x3",
             if verbose:
                 print(f"    No trained model '{model_name}' found, skipping NN solver.")
         except Exception as e:
+            # Re-raise signal-based timeout exceptions (e.g., from outer SIGALRM)
+            # so they propagate to the caller instead of being swallowed here.
+            if 'Timeout' in type(e).__name__ or 'TimedOut' in type(e).__name__:
+                raise
             if verbose:
                 print(f"    NN solver error: {e}, falling back to DLX...")
 
@@ -1612,7 +1703,7 @@ def solve_size_gated(
     device='cpu',
     verbose=True,
     exact_only_max_grid=4,
-    exact_first_max_grid=6,
+    exact_first_max_grid=9,
     exact_first_timeout=30.0,
     large_allow_dlx=False,
     allow_preplaced_fastpath=True,
@@ -1683,7 +1774,7 @@ def solve_size_gated(
         if block_planner_enabled:
             # Try all valid block sizes, smallest first (smallest = fastest sub-problems).
             # max_block_vol=512 means block_size up to 8 (8³=512).
-            block_sizes = _find_block_sizes(grid_size, min_block=5, max_block_vol=512)
+            block_sizes = _find_block_sizes(grid_size, min_block=5, max_block_vol=343)
             for bs in block_sizes:
                 # Scale timeout with block volume: larger blocks need more time.
                 scale = max(1.0, (bs ** 3) / 125.0)
@@ -1784,8 +1875,10 @@ def solve_size_gated(
         }
 
     if grid_size <= exact_first_max_grid:
+        # For N=7-9, DLX needs more time (343-729 cells); use timeout_dlx
+        dlx_first_budget = max(exact_first_timeout, timeout_dlx) if grid_size >= 7 else exact_first_timeout
         exact_sols, exact_timed_out, exact_err = _run_dlx_with_timeout(
-            pieces, grid_size, exact_first_timeout
+            pieces, grid_size, dlx_first_budget
         )
         if exact_sols:
             return {
@@ -1832,7 +1925,7 @@ def solve_size_gated(
     # exact_first_max_grid was set lower, try DLX before giving up.
     # DLX handles N=7 in ~6s, N=9 in ~30s for genuinely 3D pieces.
     if grid_size <= 9:
-        dlx_budget = min(timeout_dlx, 90.0)
+        dlx_budget = min(timeout_dlx, 600.0)
         fallback_sols, fb_timed_out, fb_err = _run_dlx_with_timeout(
             pieces, grid_size, dlx_budget,
         )
