@@ -20,7 +20,7 @@ def recommended_training_recipe(grid_size):
             "lambda_value": 1.0,
             "lambda_policy": 0.5,
             "instance_source": "constructive",
-            "constructive_variant": "mixed",
+            "constructive_variant": "robust",
         }
 
     if grid_size == 4:

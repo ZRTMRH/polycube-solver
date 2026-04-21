@@ -26,7 +26,7 @@ from phase1.test_cases import (
     verify_solution,
 )
 from phase2.data_generator import enumerate_polycubes
-from hybrid_solver import hybrid_solve, solve_size_gated
+from hybrid_solver import hybrid_solve, solve_size_gated, recommended_model_name
 from phase2.nn_solver import solve_with_nn
 from robust_generator import build_robust_constructive_case as _robust_generate
 
@@ -503,11 +503,7 @@ def run_multi_seed_proxy_grading(
 
 
 def _default_model_for_grid(grid_size: int) -> Optional[str]:
-    if grid_size == 3:
-        return "soma_3x3x3_quick"
-    if grid_size == 4:
-        return "4x4x4_adi2"
-    return None
+    return recommended_model_name(grid_size)
 
 
 def run_scale_tier_benchmark(

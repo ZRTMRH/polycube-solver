@@ -299,17 +299,13 @@ def _solve_blockwise_5cube(
                 idxs = sel3 + sel4 + sel5
                 block_pieces = [pieces[i] for i in idxs]
 
-                block_res = hybrid_solve(
+                block_sol, block_diag = _solve_cubic_block_with_nn_fallback(
                     block_pieces,
-                    grid_size=5,
-                    model_name=None,
-                    beam_width=0,
-                    timeout_nn=block_timeout_nn,
-                    timeout_dlx=block_timeout_dlx,
+                    5,
+                    block_timeout_dlx=block_timeout_dlx,
+                    block_timeout_nn=block_timeout_nn,
                     device=device,
-                    verbose=False,
                 )
-                block_sol = block_res.get('solution')
                 if block_sol is None:
                     continue
 
@@ -475,32 +471,30 @@ def _solve_blockwise_general(
                 block_pieces = [pieces[i] for i in idxs]
 
                 t_block = time.time()
-                block_res = hybrid_solve(
+                block_sol, block_diag = _solve_cubic_block_with_nn_fallback(
                     block_pieces,
-                    grid_size=block_size,
-                    model_name=None,
-                    beam_width=0,
-                    timeout_nn=block_timeout_nn,
-                    timeout_dlx=block_timeout_dlx,
+                    block_size,
+                    block_timeout_dlx=block_timeout_dlx,
+                    block_timeout_nn=block_timeout_nn,
                     device=device,
-                    verbose=False,
                 )
                 dt_block = time.time() - t_block
-                block_sol = block_res.get('solution')
                 if block_sol is None:
                     _block_logger.debug(
                         "cube block %d/%d (%d,%d,%d) size=%d trial=%d "
-                        "retry=%d FAIL %.1fs",
+                        "retry=%d FAIL %.1fs (%s)",
                         block_id + 1, num_blocks, bx, by, bz,
                         block_size, trial, retry, dt_block,
+                        block_diag.get('submethod'),
                     )
                     continue
 
                 _block_logger.debug(
                     "cube block %d/%d (%d,%d,%d) size=%d trial=%d "
-                    "retry=%d OK %.1fs",
+                    "retry=%d OK %.1fs (%s)",
                     block_id + 1, num_blocks, bx, by, bz,
                     block_size, trial, retry, dt_block,
+                    block_diag.get('submethod'),
                 )
 
                 ox, oy, oz = block_size * bx, block_size * by, block_size * bz
@@ -981,7 +975,8 @@ def _run_dlx_with_timeout(pieces, grid_size, timeout_seconds):
     # (e.g., notebook cells, stdin/heredoc runners) where __main__.__file__ is absent.
     try:
         import __main__ as main_mod
-        can_spawn_timeout = bool(getattr(main_mod, "__file__", None))
+        main_file = getattr(main_mod, "__file__", None)
+        can_spawn_timeout = bool(main_file) and not str(main_file).startswith("<")
     except Exception:  # pragma: no cover - defensive path
         can_spawn_timeout = False
 
@@ -1025,7 +1020,257 @@ def _run_dlx_with_timeout(pieces, grid_size, timeout_seconds):
         return [], False, repr(exc)
 
 
-def hybrid_solve(pieces, grid_size=None, model_name="soma_3x3x3",
+def _hybrid_block_worker(
+    block_pieces,
+    block_size,
+    model_name,
+    timeout_nn,
+    timeout_dlx,
+    device,
+    out_q,
+):
+    """Worker process entrypoint for hard-capped NN block fallback."""
+    try:
+        res = hybrid_solve(
+            block_pieces,
+            grid_size=block_size,
+            model_name=model_name,
+            timeout_nn=timeout_nn,
+            timeout_dlx=timeout_dlx,
+            device=device,
+            verbose=False,
+            allow_dlx_fallback=False,
+        )
+        out_q.put(("ok", res))
+    except Exception as exc:  # pragma: no cover - defensive path
+        out_q.put(("err", repr(exc)))
+
+
+def _run_hybrid_block_with_timeout(
+    block_pieces,
+    block_size,
+    *,
+    model_name,
+    timeout_nn,
+    timeout_dlx,
+    device,
+    timeout_seconds,
+):
+    """Run NN block fallback with a hard outer timeout."""
+    if timeout_seconds is None or timeout_seconds <= 0:
+        return {
+            'solution': None,
+            'method': None,
+            'submethod': 'nn_timeout',
+            'stages_attempted': None,
+        }, True, None
+
+    try:
+        import __main__ as main_mod
+        main_file = getattr(main_mod, "__file__", None)
+        can_spawn_timeout = bool(main_file) and not str(main_file).startswith("<")
+    except Exception:  # pragma: no cover - defensive path
+        can_spawn_timeout = False
+
+    contexts = ["spawn"] if can_spawn_timeout else []
+    if not can_spawn_timeout:
+        try:
+            mp.get_context("fork")
+            contexts.append("fork")
+        except Exception:  # pragma: no cover - platform dependent
+            pass
+
+    for ctx_name in contexts:
+        try:
+            ctx = mp.get_context(ctx_name)
+            out_q = ctx.Queue()
+            proc = ctx.Process(
+                target=_hybrid_block_worker,
+                args=(
+                    block_pieces,
+                    block_size,
+                    model_name,
+                    timeout_nn,
+                    timeout_dlx,
+                    device,
+                    out_q,
+                ),
+            )
+            proc.start()
+            proc.join(timeout_seconds)
+
+            if proc.is_alive():
+                proc.terminate()
+                proc.join()
+                return {
+                    'solution': None,
+                    'method': None,
+                    'submethod': 'nn_timeout',
+                    'stages_attempted': None,
+                }, True, None
+
+            if out_q.empty():
+                return {
+                    'solution': None,
+                    'method': None,
+                    'submethod': 'nn_worker_no_result',
+                    'stages_attempted': None,
+                }, False, "NN worker exited without result"
+
+            status, payload = out_q.get()
+            if status == "ok":
+                return payload, False, None
+            return {
+                'solution': None,
+                'method': None,
+                'submethod': 'nn_worker_error',
+                'stages_attempted': None,
+            }, False, payload
+        except Exception:
+            continue
+
+    class _HybridBlockTimeout(Exception):
+        pass
+
+    int_timeout = max(1, int(math.ceil(timeout_seconds)))
+    _prev = signal.getsignal(signal.SIGALRM)
+
+    def _handler(sig, frame):
+        raise _HybridBlockTimeout()
+
+    signal.signal(signal.SIGALRM, _handler)
+    _outer_remaining = signal.alarm(int_timeout)
+    _wall_start = time.time()
+    try:
+        return hybrid_solve(
+            block_pieces,
+            grid_size=block_size,
+            model_name=model_name,
+            timeout_nn=timeout_nn,
+            timeout_dlx=timeout_dlx,
+            device=device,
+            verbose=False,
+            allow_dlx_fallback=False,
+        ), False, None
+    except _HybridBlockTimeout:
+        return {
+            'solution': None,
+            'method': None,
+            'submethod': 'nn_timeout',
+            'stages_attempted': None,
+        }, True, None
+    except Exception as exc:  # pragma: no cover - defensive path
+        return {
+            'solution': None,
+            'method': None,
+            'submethod': 'nn_worker_error',
+            'stages_attempted': None,
+        }, False, repr(exc)
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, _prev)
+        if _outer_remaining > 0:
+            _elapsed = int(time.time() - _wall_start)
+            signal.alarm(max(1, _outer_remaining - _elapsed))
+
+
+def _solve_cubic_block_with_nn_fallback(
+    block_pieces,
+    block_size,
+    *,
+    block_timeout_dlx,
+    block_timeout_nn,
+    device,
+):
+    """Solve one cubic sub-block with DLX first, then NN on DLX timeout/error."""
+    dlx_solutions, dlx_timed_out, dlx_error = _run_dlx_with_timeout(
+        block_pieces, block_size, block_timeout_dlx
+    )
+    if dlx_solutions:
+        return dlx_solutions[0], {
+            'method': 'dlx',
+            'submethod': 'dlx_exact',
+            'dlx_timed_out': False,
+            'dlx_error': None,
+        }
+
+    # Be conservative: NN fallback is only used when DLX failed to complete
+    # cleanly, not when the exact solver explicitly found no solution.
+    if not dlx_timed_out and dlx_error is None:
+        return None, {
+            'method': None,
+            'submethod': 'dlx_no_solution',
+            'dlx_timed_out': False,
+            'dlx_error': None,
+        }
+
+    model_name = recommended_model_name(block_size)
+    if block_timeout_nn is None or block_timeout_nn <= 0 or model_name is None:
+        return None, {
+            'method': None,
+            'submethod': 'dlx_timeout' if dlx_timed_out else 'dlx_error',
+            'dlx_timed_out': dlx_timed_out,
+            'dlx_error': dlx_error,
+        }
+
+    # Keep this rare rescue path tightly bounded in wall-clock time.
+    nn_cap = max(1.0, float(block_timeout_nn))
+    nn_res, nn_timed_out, nn_error = _run_hybrid_block_with_timeout(
+        block_pieces,
+        block_size,
+        model_name=model_name,
+        timeout_nn=block_timeout_nn,
+        timeout_dlx=block_timeout_dlx,
+        device=device,
+        timeout_seconds=nn_cap,
+    )
+    block_sol = nn_res.get('solution')
+    if block_sol is not None:
+        return block_sol, {
+            'method': nn_res.get('method', 'nn'),
+            'submethod': nn_res.get('submethod', 'nn_block_fallback'),
+            'stages_attempted': nn_res.get('stages_attempted'),
+            'dlx_timed_out': dlx_timed_out,
+            'dlx_error': dlx_error,
+        }
+
+    return None, {
+        'method': None,
+        'submethod': (
+            f"{'dlx_timeout' if dlx_timed_out else 'dlx_error'}+"
+            f"{'nn_timeout' if nn_timed_out else nn_res.get('submethod', 'nn_failed')}"
+        ),
+        'stages_attempted': nn_res.get('stages_attempted'),
+        'dlx_timed_out': dlx_timed_out,
+        'dlx_error': dlx_error,
+        'nn_timed_out': nn_timed_out,
+        'nn_error': nn_error,
+    }
+
+
+def recommended_model_name(grid_size):
+    """Return the preferred NN checkpoint for a given grid size, if any."""
+    if grid_size == 3:
+        return "soma_3x3x3_quick"
+    if grid_size == 4:
+        return "4x4x4_adi2"
+    if grid_size == 5:
+        return "5x5x5_calibrated_v1_light"
+    if grid_size == 6:
+        return "6x6x6_frontier_adi_v2"
+    if grid_size == 7:
+        return "7x7x7_frontier_adi_tiny"
+    return None
+
+
+def _resolve_model_name(grid_size, model_name):
+    """Resolve a caller-facing model selector into a concrete checkpoint name."""
+    if model_name == "auto":
+        return recommended_model_name(grid_size)
+    return model_name
+
+
+def hybrid_solve(pieces, grid_size=None, model_name="auto",
                  beam_width=None, timeout_nn=30, timeout_dlx=120,
                  device='cpu', verbose=True,
                  max_candidates_per_state=None,
@@ -1068,13 +1313,15 @@ def hybrid_solve(pieces, grid_size=None, model_name="soma_3x3x3",
                  complete_max_nodes=200000,
                  complete_placement_ranker='contact',
                  complete_enable_pocket_pruning=None,
-                 complete_use_transposition=True):
+                 complete_use_transposition=True,
+                 allow_dlx_fallback=True):
     """Solve polycube packing with NN-first, DLX-fallback strategy.
 
     Args:
         pieces: list of pieces (each a list of (x,y,z) tuples)
         grid_size: side length of target cube (auto-detected if None)
-        model_name: name of saved NN model (None to skip NN)
+        model_name: name of saved NN model, 'auto' to use recommended_model_name,
+            or None to skip NN entirely
         beam_width: beam search width for NN solver
         timeout_nn: max seconds for NN solver
         timeout_dlx: max seconds for DLX solver (only on Unix)
@@ -1133,6 +1380,8 @@ def hybrid_solve(pieces, grid_size=None, model_name="soma_3x3x3",
         complete_enable_pocket_pruning: override pocket pruning for complete pass.
             If None, uses enable_pocket_pruning.
         complete_use_transposition: enable transposition table in complete pass.
+        allow_dlx_fallback: if False, return after NN stages instead of
+            falling through to exact DLX search.
 
     Returns:
         dict: {
@@ -1185,6 +1434,7 @@ def hybrid_solve(pieces, grid_size=None, model_name="soma_3x3x3",
     beam_diversity_metric = runtime["beam_diversity_metric"]
     piece_branching_width = runtime["piece_branching_width"]
     piece_branching_slack = runtime["piece_branching_slack"]
+    model_name = _resolve_model_name(grid_size, model_name)
 
     # ── Try NN solver first ──
     nn_solution = None
@@ -1639,6 +1889,15 @@ def hybrid_solve(pieces, grid_size=None, model_name="soma_3x3x3",
             if verbose:
                 print(f"    NN solver error: {e}, falling back to DLX...")
 
+    if not allow_dlx_fallback:
+        return {
+            'solution': None,
+            'method': None,
+            'submethod': 'nn_failed_no_dlx_fallback',
+            'time': nn_time,
+            'stages_attempted': stages_attempted,
+        }
+
     # ── Fall back to DLX ──
     if verbose:
         print(f"\n[2] DLX exact cover solver...")
@@ -1696,7 +1955,7 @@ def hybrid_solve(pieces, grid_size=None, model_name="soma_3x3x3",
 def solve_size_gated(
     pieces,
     grid_size=None,
-    model_name="soma_3x3x3",
+    model_name="auto",
     beam_width=None,
     timeout_nn=30,
     timeout_dlx=120,
@@ -1722,6 +1981,8 @@ def solve_size_gated(
     - grid > exact_first_max_grid: hybrid (planner placeholder tier)
 
     Args:
+        model_name: saved NN checkpoint name, 'auto' to use recommended_model_name,
+            or None to disable NN routing
         large_allow_dlx: allow large-tier DLX fallback when no model is present.
         allow_preplaced_fastpath: if True, return immediately when input pieces
             are already an absolute non-overlapping cube cover.
@@ -1753,6 +2014,7 @@ def solve_size_gated(
             'tier': 'invalid',
             'time': time.time() - t0,
         }
+    model_name = _resolve_model_name(grid_size, model_name)
 
     if allow_preplaced_fastpath:
         # Optional shortcut for callers that intentionally pass absolute tilings.
@@ -1970,7 +2232,7 @@ def solve_size_gated(
     return res
 
 
-def compare_solvers(pieces, grid_size=None, model_name="soma_3x3x3",
+def compare_solvers(pieces, grid_size=None, model_name="auto",
                     beam_width=None, device='cpu', verbose=True):
     """Run both NN and DLX solvers independently and compare results.
 

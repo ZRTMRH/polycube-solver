@@ -30,6 +30,7 @@ def solve_with_wall_timeout(pieces, grid_size, wall_timeout, solve_timeout, dlx_
         result = solve_size_gated(
             pieces,
             grid_size=grid_size,
+            model_name="auto",
             timeout=solve_timeout,
             timeout_dlx=dlx_timeout,
             verbose=False,

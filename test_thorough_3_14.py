@@ -348,8 +348,7 @@ def solve_with_timeout(pieces, N, timeout, timeout_dlx=120):
             block_timeout_dlx=45.0,
             block_planner_trials=bp_trials,
             block_retries_per_block=bp_retries,
-            # For large grids, skip useless DLX-on-full-grid fallback
-            model_name=None if N > 6 else "soma_3x3x3",
+            model_name="auto",
         )
         dt = time.time() - t0
         done_event.set()

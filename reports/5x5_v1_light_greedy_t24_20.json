@@ -1,0 +1,282 @@
+{
+  "model_name": "5x5x5_calibrated_v1_light",
+  "grid_size": 5,
+  "device": "cpu",
+  "timeout_nn": 24.0,
+  "timeout_dlx": 0.1,
+  "suite_source": "greedy_random",
+  "eval_cases": 20,
+  "valid_solved": 19,
+  "solve_rate": 0.95,
+  "avg_time_sec": 18.644070529937743,
+  "rows": [
+    {
+      "case_id": "greedy_5_00",
+      "solved": true,
+      "valid": true,
+      "time_sec": 7.810711860656738,
+      "method": "nn",
+      "submethod": "beam",
+      "stages_attempted": [
+        "beam"
+      ]
+    },
+    {
+      "case_id": "greedy_5_01",
+      "solved": true,
+      "valid": true,
+      "time_sec": 24.40540862083435,
+      "method": "nn",
+      "submethod": "dfs_frontier_harvest",
+      "stages_attempted": [
+        "beam",
+        "contact_capped_5x5",
+        "harvest_5x5",
+        "dfs_frontier_retry",
+        "frontier_complete_retry",
+        "dfs_frontier_harvest"
+      ]
+    },
+    {
+      "case_id": "greedy_5_02",
+      "solved": true,
+      "valid": true,
+      "time_sec": 19.038079261779785,
+      "method": "nn",
+      "submethod": "retry_beam",
+      "stages_attempted": [
+        "beam",
+        "contact_capped_5x5"
+      ]
+    },
+    {
+      "case_id": "greedy_5_03",
+      "solved": true,
+      "valid": true,
+      "time_sec": 15.642713069915771,
+      "method": "nn",
+      "submethod": "retry_beam",
+      "stages_attempted": [
+        "beam",
+        "contact_capped_5x5"
+      ]
+    },
+    {
+      "case_id": "greedy_5_04",
+      "solved": true,
+      "valid": true,
+      "time_sec": 23.987205266952515,
+      "method": "nn",
+      "submethod": "dfs_frontier_harvest",
+      "stages_attempted": [
+        "beam",
+        "contact_capped_5x5",
+        "harvest_5x5",
+        "dfs_frontier_retry",
+        "frontier_complete_retry",
+        "dfs_frontier_harvest"
+      ]
+    },
+    {
+      "case_id": "greedy_5_05",
+      "solved": true,
+      "valid": true,
+      "time_sec": 25.751203775405884,
+      "method": "nn",
+      "submethod": "dfs_frontier_harvest",
+      "stages_attempted": [
+        "beam",
+        "contact_capped_5x5",
+        "harvest_5x5",
+        "dfs_frontier_retry",
+        "frontier_complete_retry",
+        "dfs_frontier_harvest"
+      ]
+    },
+    {
+      "case_id": "greedy_5_06",
+      "solved": true,
+      "valid": true,
+      "time_sec": 17.393453121185303,
+      "method": "nn",
+      "submethod": "retry_beam",
+      "stages_attempted": [
+        "beam",
+        "contact_capped_5x5"
+      ]
+    },
+    {
+      "case_id": "greedy_5_07",
+      "solved": true,
+      "valid": true,
+      "time_sec": 16.477968215942383,
+      "method": "nn",
+      "submethod": "retry_beam",
+      "stages_attempted": [
+        "beam",
+        "contact_capped_5x5"
+      ]
+    },
+    {
+      "case_id": "greedy_5_08",
+      "solved": true,
+      "valid": true,
+      "time_sec": 25.45410704612732,
+      "method": "nn",
+      "submethod": "dfs_frontier_harvest",
+      "stages_attempted": [
+        "beam",
+        "contact_capped_5x5",
+        "harvest_5x5",
+        "dfs_frontier_retry",
+        "frontier_complete_retry",
+        "dfs_frontier_harvest"
+      ]
+    },
+    {
+      "case_id": "greedy_5_09",
+      "solved": false,
+      "valid": false,
+      "time_sec": 35.34165906906128,
+      "method": null,
+      "submethod": "dlx_timeout",
+      "stages_attempted": [
+        "beam",
+        "contact_capped_5x5",
+        "harvest_5x5",
+        "dfs_frontier_retry",
+        "frontier_complete_retry",
+        "dfs_frontier_harvest",
+        "frontier_complete_harvest",
+        "dfs_frontier_beam",
+        "frontier_complete_beam",
+        "dlx"
+      ]
+    },
+    {
+      "case_id": "greedy_5_10",
+      "solved": true,
+      "valid": true,
+      "time_sec": 25.862370014190674,
+      "method": "nn",
+      "submethod": "dfs_frontier_harvest",
+      "stages_attempted": [
+        "beam",
+        "contact_capped_5x5",
+        "harvest_5x5",
+        "dfs_frontier_retry",
+        "frontier_complete_retry",
+        "dfs_frontier_harvest"
+      ]
+    },
+    {
+      "case_id": "greedy_5_11",
+      "solved": true,
+      "valid": true,
+      "time_sec": 7.376018047332764,
+      "method": "nn",
+      "submethod": "beam",
+      "stages_attempted": [
+        "beam"
+      ]
+    },
+    {
+      "case_id": "greedy_5_12",
+      "solved": true,
+      "valid": true,
+      "time_sec": 16.6359601020813,
+      "method": "nn",
+      "submethod": "retry_beam",
+      "stages_attempted": [
+        "beam",
+        "contact_capped_5x5"
+      ]
+    },
+    {
+      "case_id": "greedy_5_13",
+      "solved": true,
+      "valid": true,
+      "time_sec": 17.03199315071106,
+      "method": "nn",
+      "submethod": "retry_beam",
+      "stages_attempted": [
+        "beam",
+        "contact_capped_5x5"
+      ]
+    },
+    {
+      "case_id": "greedy_5_14",
+      "solved": true,
+      "valid": true,
+      "time_sec": 24.285719871520996,
+      "method": "nn",
+      "submethod": "dfs_frontier_harvest",
+      "stages_attempted": [
+        "beam",
+        "contact_capped_5x5",
+        "harvest_5x5",
+        "dfs_frontier_retry",
+        "frontier_complete_retry",
+        "dfs_frontier_harvest"
+      ]
+    },
+    {
+      "case_id": "greedy_5_15",
+      "solved": true,
+      "valid": true,
+      "time_sec": 8.73010802268982,
+      "method": "nn",
+      "submethod": "beam",
+      "stages_attempted": [
+        "beam"
+      ]
+    },
+    {
+      "case_id": "greedy_5_16",
+      "solved": true,
+      "valid": true,
+      "time_sec": 18.530131101608276,
+      "method": "nn",
+      "submethod": "retry_beam",
+      "stages_attempted": [
+        "beam",
+        "contact_capped_5x5"
+      ]
+    },
+    {
+      "case_id": "greedy_5_17",
+      "solved": true,
+      "valid": true,
+      "time_sec": 7.5483009815216064,
+      "method": "nn",
+      "submethod": "beam",
+      "stages_attempted": [
+        "beam"
+      ]
+    },
+    {
+      "case_id": "greedy_5_18",
+      "solved": true,
+      "valid": true,
+      "time_sec": 18.525205850601196,
+      "method": "nn",
+      "submethod": "retry_beam",
+      "stages_attempted": [
+        "beam",
+        "contact_capped_5x5"
+      ]
+    },
+    {
+      "case_id": "greedy_5_19",
+      "solved": true,
+      "valid": true,
+      "time_sec": 17.053094148635864,
+      "method": "nn",
+      "submethod": "retry_beam",
+      "stages_attempted": [
+        "beam",
+        "contact_capped_5x5"
+      ]
+    }
+  ]
+}
