@@ -1,0 +1,96 @@
+{
+  "grid_size": 6,
+  "max_pieces": 64,
+  "base_model_name": "6x6x6_warmstart_from_5x5",
+  "bootstrap_instances": 140,
+  "frontier_instances": 40,
+  "frontier_examples": 50,
+  "adi_epochs": 12,
+  "batch_size": 32,
+  "lr": 0.0003,
+  "lambda_value": 1.0,
+  "lambda_policy": 0.25,
+  "bootstrap_variant": "connected,robust",
+  "frontier_variant": "connected,robust",
+  "bootstrap_mix": {
+    "variant_spec": "connected,robust",
+    "variant_request_counts": {
+      "connected": 70,
+      "robust": 70
+    },
+    "instance_source_counts": {
+      "connected_constructive": 70,
+      "robust_constructive": 70
+    }
+  },
+  "frontier_mix": {
+    "variant_spec": "connected,robust",
+    "variant_request_counts": {
+      "connected": 20,
+      "robust": 20
+    },
+    "instance_source_counts": {
+      "connected_constructive": 20,
+      "robust_constructive": 20
+    }
+  },
+  "instance_seed": 42,
+  "base_metadata": {
+    "grid_size": 6,
+    "max_pieces": 64,
+    "base_model_name": "5x5x5_modal_constructive_v1",
+    "base_metadata": {
+      "grid_size": 5,
+      "max_pieces": 42,
+      "num_instances": 80,
+      "num_negatives": 0,
+      "num_examples": 2561,
+      "epochs": 35,
+      "batch_size": 64,
+      "lr": 0.001,
+      "lambda_value": 1.0,
+      "lambda_policy": 0.3,
+      "instance_source": "constructive",
+      "constructive_variant": "mixed",
+      "instance_seed": 42,
+      "value_head_type": "gap",
+      "policy_head_type": "conv",
+      "final_val_acc": 1.0
+    },
+    "num_instances": 40,
+    "num_negatives": 1,
+    "hard_negative_instances": 10,
+    "hard_negative_verify_fraction": 0.1,
+    "hard_negative_verify_max_states": 8,
+    "hard_negative_verify_timeout": 2.0,
+    "hard_negative_summary": {
+      "instances": 10,
+      "failed_searches": 9,
+      "verified_states": 72,
+      "hard_negatives": 14,
+      "skipped_states": 2840,
+      "timed_out_states": 2
+    },
+    "num_examples": 1341,
+    "positive_examples": 1287,
+    "negative_examples": 54,
+    "epochs": 6,
+    "batch_size": 48,
+    "lr": 0.0001,
+    "lambda_value": 1.0,
+    "lambda_policy": 0.05,
+    "constructive_variant": "mixed",
+    "seed": 3101,
+    "value_head_type": "gap",
+    "policy_head_type": "conv",
+    "use_context_features": false,
+    "final_val_acc": 0.9695652173913043,
+    "transfer_from_model": "5x5x5_calibrated_v1_light",
+    "source_grid_size": 5,
+    "source_max_pieces": 42,
+    "transfer_loaded_keys": 96,
+    "transfer_skipped_keys": 0,
+    "warm_started_from": "5x5x5_calibrated_v1_light"
+  },
+  "final_val_acc": 1.0
+}

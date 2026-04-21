@@ -1,0 +1,192 @@
+{
+  "grid_size": 7,
+  "max_pieces": 96,
+  "base_model_name": "7x7x7_warmstart_from_6x6_constructive",
+  "bootstrap_instances": 40,
+  "frontier_instances": 20,
+  "frontier_examples": 0,
+  "adi_epochs": 2,
+  "batch_size": 24,
+  "lr": 0.00015,
+  "lambda_value": 1.0,
+  "lambda_policy": 0.35,
+  "bootstrap_variant": "connected,robust,new_hard",
+  "frontier_variant": "robust*2,new_hard*2",
+  "bootstrap_mix": {
+    "variant_spec": "connected,robust,new_hard",
+    "variant_request_counts": {
+      "connected": 13,
+      "robust": 13,
+      "new_hard": 14
+    },
+    "instance_source_counts": {
+      "connected_constructive": 27,
+      "robust_constructive": 13
+    },
+    "variant_generation_details": {
+      "connected": {
+        "variant_spec": "connected",
+        "variant_request_counts": {
+          "connected": 13
+        },
+        "instance_source_counts": {
+          "connected_constructive": 13
+        }
+      },
+      "robust": {
+        "variant_spec": "robust",
+        "variant_request_counts": {
+          "robust": 13
+        },
+        "instance_source_counts": {
+          "robust_constructive": 13
+        }
+      },
+      "new_hard": {
+        "variant_name": "new_hard",
+        "score_key": "new_hard_score",
+        "candidate_variant_spec": "connected",
+        "candidate_meta": {
+          "variant_spec": "connected",
+          "variant_request_counts": {
+            "connected": 84
+          },
+          "instance_source_counts": {
+            "connected_constructive": 84
+          }
+        },
+        "selected_instance_source_counts": {
+          "connected_constructive": 14
+        }
+      }
+    }
+  },
+  "frontier_mix": {
+    "variant_spec": "robust*2,new_hard*2",
+    "variant_request_counts": {
+      "robust": 10,
+      "new_hard": 10
+    },
+    "instance_source_counts": {
+      "robust_constructive": 10,
+      "connected_constructive": 10
+    },
+    "variant_generation_details": {
+      "robust": {
+        "variant_spec": "robust",
+        "variant_request_counts": {
+          "robust": 10
+        },
+        "instance_source_counts": {
+          "robust_constructive": 10
+        }
+      },
+      "new_hard": {
+        "variant_name": "new_hard",
+        "score_key": "new_hard_score",
+        "candidate_variant_spec": "connected",
+        "candidate_meta": {
+          "variant_spec": "connected",
+          "variant_request_counts": {
+            "connected": 60
+          },
+          "instance_source_counts": {
+            "connected_constructive": 60
+          }
+        },
+        "selected_instance_source_counts": {
+          "connected_constructive": 10
+        }
+      }
+    }
+  },
+  "instance_seed": 42,
+  "proxy_suite_path": "reports/7x7x7_constructive_scale_suite_v1.json",
+  "proxy_cases_per_bucket": 1,
+  "proxy_eval_every": 2,
+  "proxy_patience": 1,
+  "proxy_eval_history": [],
+  "epochs_completed": 2,
+  "best_proxy_score": null,
+  "base_metadata": {
+    "grid_size": 7,
+    "max_pieces": 96,
+    "base_model_name": "6x6x6_warmstart_from_5x5",
+    "bootstrap_instances": 120,
+    "frontier_instances": 30,
+    "frontier_examples": 58,
+    "adi_epochs": 12,
+    "batch_size": 32,
+    "lr": 0.0003,
+    "lambda_value": 1.0,
+    "lambda_policy": 0.25,
+    "bootstrap_variant": "connected",
+    "frontier_variant": "connected",
+    "instance_seed": 42,
+    "base_metadata": {
+      "grid_size": 6,
+      "max_pieces": 64,
+      "base_model_name": "5x5x5_modal_constructive_v1",
+      "base_metadata": {
+        "grid_size": 5,
+        "max_pieces": 42,
+        "num_instances": 80,
+        "num_negatives": 0,
+        "num_examples": 2561,
+        "epochs": 35,
+        "batch_size": 64,
+        "lr": 0.001,
+        "lambda_value": 1.0,
+        "lambda_policy": 0.3,
+        "instance_source": "constructive",
+        "constructive_variant": "mixed",
+        "instance_seed": 42,
+        "value_head_type": "gap",
+        "policy_head_type": "conv",
+        "final_val_acc": 1.0
+      },
+      "num_instances": 40,
+      "num_negatives": 1,
+      "hard_negative_instances": 10,
+      "hard_negative_verify_fraction": 0.1,
+      "hard_negative_verify_max_states": 8,
+      "hard_negative_verify_timeout": 2.0,
+      "hard_negative_summary": {
+        "instances": 10,
+        "failed_searches": 9,
+        "verified_states": 72,
+        "hard_negatives": 14,
+        "skipped_states": 2840,
+        "timed_out_states": 2
+      },
+      "num_examples": 1341,
+      "positive_examples": 1287,
+      "negative_examples": 54,
+      "epochs": 6,
+      "batch_size": 48,
+      "lr": 0.0001,
+      "lambda_value": 1.0,
+      "lambda_policy": 0.05,
+      "constructive_variant": "mixed",
+      "seed": 3101,
+      "value_head_type": "gap",
+      "policy_head_type": "conv",
+      "use_context_features": false,
+      "final_val_acc": 0.9695652173913043,
+      "transfer_from_model": "5x5x5_calibrated_v1_light",
+      "source_grid_size": 5,
+      "source_max_pieces": 42,
+      "transfer_loaded_keys": 96,
+      "transfer_skipped_keys": 0,
+      "warm_started_from": "5x5x5_calibrated_v1_light"
+    },
+    "final_val_acc": 1.0,
+    "transfer_from_model": "6x6x6_frontier_adi_v1",
+    "source_grid_size": 6,
+    "source_max_pieces": 64,
+    "transfer_loaded_keys": 96,
+    "transfer_skipped_keys": 0,
+    "warm_started_from": "6x6x6_frontier_adi_v1"
+  },
+  "final_val_acc": null
+}

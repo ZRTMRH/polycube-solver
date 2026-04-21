@@ -41,11 +41,14 @@ class DLX:
         solutions = dlx.solve()  # list of lists of row_ids
     """
 
-    def __init__(self, columns):
+    def __init__(self, columns, secondary=None):
         """Initialize the DLX structure.
 
         Args:
-            columns: list of column names/identifiers
+            columns: list of primary column names (must all be covered)
+            secondary: optional list of secondary column names (covered at
+                most once; not required for a solution). Useful for "at most
+                one" constraints like piece-ID uniqueness.
         """
         self.header = Column("header")
         self.columns = {}  # name -> Column node
@@ -53,7 +56,7 @@ class DLX:
         self.solution = []
         self.solutions = []
 
-        # Build column headers linked left-right
+        # Build primary column headers linked left-right in the header ring.
         prev = self.header
         for name in columns:
             col = Column(name)
@@ -65,6 +68,15 @@ class DLX:
             prev.right = col
             self.header.left = col
             prev = col
+
+        # Secondary columns: NOT in the header ring so _choose_column
+        # never selects them. Covering still removes competing rows.
+        if secondary:
+            for name in secondary:
+                col = Column(name)
+                self.columns[name] = col
+                self._col_list.append(col)
+                # left/right point to self (not linked into header ring)
 
     def add_row(self, row_id, cols):
         """Add a row to the matrix.
@@ -143,22 +155,31 @@ class DLX:
             col = col.right
         return best
 
-    def solve(self, find_all=False):
+    def solve(self, find_all=False, max_nodes=0):
         """Run Algorithm X to find exact cover solutions.
 
         Args:
             find_all: if True, find all solutions; otherwise stop at first
+            max_nodes: if > 0, abort search after this many nodes explored
+                (returns whatever solutions were found so far)
 
         Returns:
             list of solutions, where each solution is a list of row_ids
         """
         self.solutions = []
         self.solution = []
+        self._nodes_explored = 0
+        self._max_nodes = max_nodes
+        self._aborted = False
         self._search(find_all)
         return self.solutions
 
     def _search(self, find_all):
         """Recursive Algorithm X search."""
+        if self._max_nodes > 0 and self._nodes_explored >= self._max_nodes:
+            self._aborted = True
+            return False
+
         if self.header.right is self.header:
             # All columns covered — found a solution
             self.solutions.append(list(self.solution))
@@ -172,6 +193,12 @@ class DLX:
 
         row = col.down
         while row is not col:
+            self._nodes_explored += 1
+            if self._max_nodes > 0 and self._nodes_explored >= self._max_nodes:
+                self._aborted = True
+                self._uncover(col)
+                return False
+
             self.solution.append(row.row_id)
 
             # Cover all other columns in this row
@@ -185,6 +212,12 @@ class DLX:
                 self._uncover_row(row)
                 self._uncover(col)
                 return True
+
+            if self._aborted:
+                self.solution.pop()
+                self._uncover_row(row)
+                self._uncover(col)
+                return False
 
             # Undo: uncover columns in reverse order
             self.solution.pop()
